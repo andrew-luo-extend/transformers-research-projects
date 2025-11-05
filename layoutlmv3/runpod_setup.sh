@@ -16,9 +16,18 @@ MODEL_NAME="layoutlmv3-commonforms"
 GIT_REPO="https://github.com/andrew-luo-extend/transformers-research-projects.git"
 USE_STREAMING="${USE_STREAMING:-false}"  # Set to true if using streaming mode
 
+# === VOLUME STORAGE PATHS (RunPod Network Volume) ===
+CACHE_DIR="/workspace/hf-cache"
+OUTPUT_DIR="/workspace/output"
+DATASETS_CACHE="$CACHE_DIR/datasets"
+
 # === CHECK GPU ===
 echo "Checking GPU availability..."
 nvidia-smi || echo "Warning: nvidia-smi not found"
+
+# === INSTALL SCREEN/TMUX ===
+echo "Installing screen and tmux for persistent sessions..."
+apt-get update -qq && apt-get install -y -qq screen tmux > /dev/null 2>&1 || echo "Note: screen/tmux may already be installed"
 
 # === SETUP WORKSPACE ===
 echo "Setting up workspace..."
@@ -66,6 +75,34 @@ pip install transformers torch evaluate accelerate sentencepiece huggingface_hub
 # Verify PyTorch CUDA
 $PYTHON_CMD -c "import torch; print(f'PyTorch version: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda if torch.cuda.is_available() else \"N/A\"}'); print(f'GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"N/A\"}')"
 
+# === SETUP VOLUME STORAGE ===
+echo "Setting up volume storage directories..."
+mkdir -p $CACHE_DIR
+mkdir -p $DATASETS_CACHE
+mkdir -p $OUTPUT_DIR
+
+# Set environment variables to use volume storage
+export HF_HOME=$CACHE_DIR
+export HF_DATASETS_CACHE=$DATASETS_CACHE
+export TRANSFORMERS_CACHE=$CACHE_DIR
+
+# Add to bashrc for persistence
+echo "export HF_HOME=$CACHE_DIR" >> ~/.bashrc
+echo "export HF_DATASETS_CACHE=$DATASETS_CACHE" >> ~/.bashrc
+echo "export TRANSFORMERS_CACHE=$CACHE_DIR" >> ~/.bashrc
+
+echo "✓ Cache directories created on volume:"
+echo "  HF_HOME: $HF_HOME"
+echo "  HF_DATASETS_CACHE: $HF_DATASETS_CACHE"
+echo "  TRANSFORMERS_CACHE: $TRANSFORMERS_CACHE"
+echo "  OUTPUT_DIR: $OUTPUT_DIR"
+
+# Clear any existing cache on container disk to avoid conflicts
+if [ -d "/root/.cache/huggingface" ]; then
+    echo "Clearing container disk cache to prevent disk quota issues..."
+    rm -rf /root/.cache/huggingface/*
+fi
+
 # === HUGGINGFACE AUTHENTICATION ===
 echo "Setting up HuggingFace authentication..."
 if [ "$HF_TOKEN" != "hf_YOUR_TOKEN_HERE" ]; then
@@ -84,6 +121,11 @@ cat > train_full.sh << 'SCRIPT_EOF'
 #!/bin/bash
 set -e
 
+# Use volume storage (CRITICAL - avoids container disk quota errors)
+export HF_HOME=/workspace/hf-cache
+export HF_DATASETS_CACHE=/workspace/hf-cache/datasets
+export TRANSFORMERS_CACHE=/workspace/hf-cache
+
 # Load HF token if available
 if [ -n "$HF_TOKEN" ]; then
     export HF_TOKEN=$HF_TOKEN
@@ -92,9 +134,11 @@ fi
 cd /workspace/layoutlmv3-training/transformers-research-projects/layoutlmv3
 
 echo "Starting full training..."
+echo "Cache directory: /workspace/hf-cache (volume storage)"
 python run_funsd_cord.py \
   --dataset_name commonforms \
   --model_name_or_path microsoft/layoutlmv3-base \
+  --cache_dir /workspace/hf-cache \
   --output_dir /workspace/output \
   --do_train \
   --do_eval \
@@ -106,7 +150,7 @@ python run_funsd_cord.py \
   --weight_decay 0.01 \
   --logging_steps 100 \
   --save_strategy epoch \
-  --evaluation_strategy epoch \
+  --eval_strategy epoch \
   --fp16 \
   --save_total_limit 3 \
   --load_best_model_at_end \
@@ -119,6 +163,7 @@ python run_funsd_cord.py \
   --overwrite_output_dir
 
 echo "Training completed!"
+echo "Model saved to: /workspace/output"
 SCRIPT_EOF
 
 chmod +x train_full.sh
@@ -128,12 +173,19 @@ cat > train_test.sh << 'SCRIPT_EOF'
 #!/bin/bash
 set -e
 
+# Use volume storage (CRITICAL - avoids container disk quota errors)
+export HF_HOME=/workspace/hf-cache
+export HF_DATASETS_CACHE=/workspace/hf-cache/datasets
+export TRANSFORMERS_CACHE=/workspace/hf-cache
+
 cd /workspace/layoutlmv3-training/transformers-research-projects/layoutlmv3
 
 echo "Starting quick test run..."
+echo "Cache directory: /workspace/hf-cache (volume storage)"
 python run_funsd_cord.py \
   --dataset_name commonforms \
   --model_name_or_path microsoft/layoutlmv3-base \
+  --cache_dir /workspace/hf-cache \
   --output_dir /workspace/output_test \
   --do_train \
   --do_eval \
@@ -144,7 +196,7 @@ python run_funsd_cord.py \
   --learning_rate 5e-5 \
   --logging_steps 5 \
   --save_strategy epoch \
-  --evaluation_strategy epoch \
+  --eval_strategy epoch \
   --fp16 \
   --overwrite_output_dir
 
@@ -158,17 +210,24 @@ cat > train_streaming.sh << 'SCRIPT_EOF'
 #!/bin/bash
 set -e
 
+# Use volume storage for model outputs
+export HF_HOME=/workspace/hf-cache
+export TRANSFORMERS_CACHE=/workspace/hf-cache
+
+# Load HF token if available
 if [ -n "$HF_TOKEN" ]; then
     export HF_TOKEN=$HF_TOKEN
 fi
 
 cd /workspace/layoutlmv3-training/transformers-research-projects/layoutlmv3
 
-echo "Starting training with streaming mode (saves disk space)..."
+echo "Starting training with streaming mode (no dataset download)..."
+echo "Output directory: /workspace/output (volume storage)"
 python run_funsd_cord.py \
   --dataset_name commonforms \
   --use_streaming \
   --model_name_or_path microsoft/layoutlmv3-base \
+  --cache_dir /workspace/hf-cache \
   --output_dir /workspace/output \
   --do_train \
   --do_eval \
@@ -180,7 +239,7 @@ python run_funsd_cord.py \
   --weight_decay 0.01 \
   --logging_steps 100 \
   --save_strategy epoch \
-  --evaluation_strategy epoch \
+  --eval_strategy epoch \
   --fp16 \
   --save_total_limit 3 \
   --load_best_model_at_end \
@@ -193,6 +252,7 @@ python run_funsd_cord.py \
   --overwrite_output_dir
 
 echo "Training completed!"
+echo "Model saved to: /workspace/output"
 SCRIPT_EOF
 
 chmod +x train_streaming.sh
@@ -240,13 +300,18 @@ echo "  ./launch_tensorboard.sh  - Launch TensorBoard"
 echo ""
 echo "Recommended workflow:"
 echo "  1. Run test: ./train_test.sh"
-echo "  2. If successful, run: screen -S training"
-echo "  3. Inside screen: ./train_full.sh"
-echo "  4. Detach: Ctrl+A, then D"
-echo "  5. Reattach: screen -r training"
+echo "  2. If successful, start persistent session:"
+echo "     tmux new -s training  (or: screen -S training)"
+echo "  3. Inside tmux: ./train_full.sh"
+echo "  4. Detach: Ctrl+B then D  (screen: Ctrl+A then D)"
+echo "  5. Reattach: tmux attach -t training  (screen: screen -r training)"
 echo ""
-echo "Output location: /workspace/output"
-echo "Model will be uploaded to: https://huggingface.co/$HF_USERNAME/$MODEL_NAME"
+echo "Storage locations (ALL on network volume - survives pod restart):"
+echo "  Dataset cache: /workspace/hf-cache/datasets"
+echo "  Model output:  /workspace/output"
+echo "  HuggingFace:   https://huggingface.co/$HF_USERNAME/$MODEL_NAME"
+echo ""
+echo "✓ All scripts configured to use volume storage (no disk quota errors)"
 echo ""
 echo "=========================================="
 
