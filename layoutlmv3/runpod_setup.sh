@@ -13,7 +13,7 @@ echo "=========================================="
 HF_TOKEN="${HF_TOKEN:-hf_YOUR_TOKEN_HERE}"  # Set via environment or edit here
 HF_USERNAME="${HF_USERNAME:-your-username}"  # Your HuggingFace username
 MODEL_NAME="layoutlmv3-commonforms"
-GIT_REPO="https://github.com/huggingface/transformers-research-projects.git"
+GIT_REPO="https://github.com/andrew-luo-extend/transformers-research-projects.git"
 USE_STREAMING="${USE_STREAMING:-false}"  # Set to true if using streaming mode
 
 # === CHECK GPU ===

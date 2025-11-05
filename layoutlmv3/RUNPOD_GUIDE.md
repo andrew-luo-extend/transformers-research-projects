@@ -46,7 +46,7 @@ ssh root@<pod-ip> -p <port> -i ~/.ssh/id_rsa
 ```bash
 # Download and run the setup script
 cd /workspace
-wget https://raw.githubusercontent.com/<your-username>/transformers-research-projects/main/layoutlmv3/runpod_setup.sh
+wget https://raw.githubusercontent.com/andrew-luo-extend/transformers-research-projects/main/layoutlmv3/runpod_setup.sh
 chmod +x runpod_setup.sh
 
 # Set your credentials (IMPORTANT!)
