@@ -305,18 +305,41 @@ def main():
         label_list.sort()
         return label_list
 
-    # If the labels are of type ClassLabel, they are already integers and we have the map stored somewhere.
-    # Otherwise, we have to get the list of labels manually.
-    if isinstance(features[label_column_name].feature, ClassLabel):
+    # Special handling for commonforms dataset (object detection format)
+    if data_args.dataset_name == "commonforms":
+        # For commonforms, extract unique category_ids from objects
+        logger.info("Extracting labels from commonforms dataset...")
+        unique_labels = set()
+        split_name = "train" if training_args.do_train else "test"
+        
+        # Limit samples for label extraction to avoid long processing
+        max_samples_for_labels = 1000
+        sample_count = 0
+        
+        for example in dataset[split_name]:
+            if sample_count >= max_samples_for_labels:
+                break
+            if "objects" in example and "category_id" in example["objects"]:
+                unique_labels.update(example["objects"]["category_id"])
+            sample_count += 1
+        
+        label_list = sorted(list(unique_labels))
+        id2label = {i: str(label) for i, label in enumerate(label_list)}
+        label2id = {str(label): i for i, label in enumerate(label_list)}
+        num_labels = len(label_list)
+        logger.info(f"Found {num_labels} unique labels: {label_list}")
+    # Standard handling for FUNSD/CORD datasets
+    elif hasattr(features[label_column_name], 'feature') and isinstance(features[label_column_name].feature, ClassLabel):
         label_list = features[label_column_name].feature.names
         # No need to convert the labels since they are already ints.
         id2label = dict(enumerate(label_list))
         label2id = {v: k for k, v in enumerate(label_list)}
+        num_labels = len(label_list)
     else:
-        label_list = get_label_list(datasets["train"][label_column_name])
+        label_list = get_label_list(dataset["train"][label_column_name])
         id2label = dict(enumerate(label_list))
         label2id = {v: k for k, v in enumerate(label_list)}
-    num_labels = len(label_list)
+        num_labels = len(label_list)
 
     # Load pretrained model and processor
     #
