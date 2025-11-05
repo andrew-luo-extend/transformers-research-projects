@@ -27,7 +27,8 @@ from typing import Optional
 
 import datasets
 import numpy as np
-from datasets import ClassLabel, load_dataset, load_metric
+from datasets import ClassLabel, load_dataset
+import evaluate
 
 import transformers
 from transformers import (
@@ -97,7 +98,7 @@ class DataTrainingArguments:
     task_name: Optional[str] = field(default="ner", metadata={"help": "The name of the task (ner, pos...)."})
     dataset_name: Optional[str] = field(
         default="nielsr/funsd-layoutlmv3",
-        metadata={"help": "The name of the dataset to use (via the datasets library)."},
+        metadata={"help": "The name of the dataset to use (via the datasets library). Supported: funsd, cord, commonforms"},
     )
     dataset_config_name: Optional[str] = field(
         default=None, metadata={"help": "The configuration name of the dataset to use (via the datasets library)."}
@@ -175,6 +176,10 @@ class DataTrainingArguments:
         default=False,
         metadata={"help": "Whether to return all the entity levels during evaluation or just the overall ones."},
     )
+    use_streaming: bool = field(
+        default=False,
+        metadata={"help": "Whether to use streaming mode for large datasets (avoids downloading entire dataset)."},
+    )
 
     def __post_init__(self):
         if self.dataset_name is None and self.train_file is None and self.validation_file is None:
@@ -251,6 +256,7 @@ def main():
             data_args.dataset_config_name,
             cache_dir=model_args.cache_dir,
             token=True if model_args.use_auth_token else None,
+            streaming=data_args.use_streaming,
         )
     elif data_args.dataset_name == "cord":
         # Downloading and loading a dataset from the hub.
@@ -259,9 +265,19 @@ def main():
             data_args.dataset_config_name,
             cache_dir=model_args.cache_dir,
             token=True if model_args.use_auth_token else None,
+            streaming=data_args.use_streaming,
+        )
+    elif data_args.dataset_name == "commonforms":
+        # Downloading and loading a dataset from the hub.
+        dataset = load_dataset(
+            "jbarrow/CommonForms",
+            data_args.dataset_config_name,
+            cache_dir=model_args.cache_dir,
+            token=True if model_args.use_auth_token else None,
+            streaming=data_args.use_streaming,
         )
     else:
-        raise ValueError("This script only supports either FUNSD or CORD out-of-the-box.")
+        raise ValueError("This script only supports FUNSD, CORD, or commonforms out-of-the-box.")
 
     if training_args.do_train:
         column_names = dataset["train"].column_names
@@ -339,6 +355,46 @@ def main():
     model.config.label2id = label2id
     model.config.id2label = id2label
 
+    # Preprocessing function to convert commonforms format to token classification format
+    def convert_commonforms_to_token_format(examples):
+        """Convert object detection format to token classification format."""
+        batch_size = len(examples["image"])
+        images = []
+        words_list = []
+        bboxes_list = []
+        labels_list = []
+        
+        for i in range(batch_size):
+            images.append(examples["image"][i])
+            
+            # Extract objects for this example
+            objects = examples["objects"][i]
+            num_objects = len(objects["bbox"])
+            
+            # Create placeholder words for each object (since object detection doesn't have text)
+            words = ["[OBJ]"] * num_objects
+            
+            # Extract bboxes - normalize if needed (LayoutLMv3 expects [x0, y0, x1, y1] format)
+            bboxes = []
+            for bbox in objects["bbox"]:
+                # bbox is [x, y, width, height] format, convert to [x0, y0, x1, y1]
+                x, y, w, h = bbox
+                bboxes.append([x, y, x + w, y + h])
+            
+            # Extract labels (use category_id)
+            labels = objects["category_id"]
+            
+            words_list.append(words)
+            bboxes_list.append(bboxes)
+            labels_list.append(labels)
+        
+        return {
+            "image": images,
+            "words": words_list,
+            "bboxes": bboxes_list,
+            "ner_tags": labels_list,
+        }
+
     # Preprocessing the dataset
     # The processor does everything for us (prepare the image using LayoutLMv3ImageProcessor
     # and prepare the words, boxes and word-level labels using LayoutLMv3TokenizerFast)
@@ -367,6 +423,18 @@ def main():
         if data_args.max_train_samples is not None:
             train_dataset = train_dataset.select(range(data_args.max_train_samples))
         with training_args.main_process_first(desc="train dataset map pre-processing"):
+            # Convert commonforms format if needed
+            if data_args.dataset_name == "commonforms":
+                train_dataset = train_dataset.map(
+                    convert_commonforms_to_token_format,
+                    batched=True,
+                    remove_columns=remove_columns,
+                    num_proc=data_args.preprocessing_num_workers,
+                    load_from_cache_file=not data_args.overwrite_cache,
+                )
+                # Update remove_columns for the next step
+                remove_columns = ["image", "words", "bboxes", "ner_tags"]
+            
             train_dataset = train_dataset.map(
                 prepare_examples,
                 batched=True,
@@ -383,32 +451,62 @@ def main():
         if data_args.max_eval_samples is not None:
             eval_dataset = eval_dataset.select(range(data_args.max_eval_samples))
         with training_args.main_process_first(desc="validation dataset map pre-processing"):
+            # Convert commonforms format if needed
+            if data_args.dataset_name == "commonforms":
+                # Re-get column names for eval dataset
+                eval_remove_columns = eval_dataset.column_names
+                eval_dataset = eval_dataset.map(
+                    convert_commonforms_to_token_format,
+                    batched=True,
+                    remove_columns=eval_remove_columns,
+                    num_proc=data_args.preprocessing_num_workers,
+                    load_from_cache_file=not data_args.overwrite_cache,
+                )
+                eval_remove_columns = ["image", "words", "bboxes", "ner_tags"]
+            else:
+                eval_remove_columns = remove_columns
+                
             eval_dataset = eval_dataset.map(
                 prepare_examples,
                 batched=True,
-                remove_columns=remove_columns,
+                remove_columns=eval_remove_columns,
                 num_proc=data_args.preprocessing_num_workers,
                 load_from_cache_file=not data_args.overwrite_cache,
             )
 
     if training_args.do_predict:
-        if "test" not in datasets:
+        if "test" not in dataset:
             raise ValueError("--do_predict requires a test dataset")
-        predict_dataset = datasets["test"]
+        predict_dataset = dataset["test"]
         if data_args.max_predict_samples is not None:
             max_predict_samples = min(len(predict_dataset), data_args.max_predict_samples)
             predict_dataset = predict_dataset.select(range(max_predict_samples))
         with training_args.main_process_first(desc="prediction dataset map pre-processing"):
+            # Convert commonforms format if needed
+            if data_args.dataset_name == "commonforms":
+                # Re-get column names for predict dataset
+                predict_remove_columns = predict_dataset.column_names
+                predict_dataset = predict_dataset.map(
+                    convert_commonforms_to_token_format,
+                    batched=True,
+                    remove_columns=predict_remove_columns,
+                    num_proc=data_args.preprocessing_num_workers,
+                    load_from_cache_file=not data_args.overwrite_cache,
+                )
+                predict_remove_columns = ["image", "words", "bboxes", "ner_tags"]
+            else:
+                predict_remove_columns = remove_columns
+                
             predict_dataset = predict_dataset.map(
                 prepare_examples,
                 batched=True,
-                remove_columns=remove_columns,
+                remove_columns=predict_remove_columns,
                 num_proc=data_args.preprocessing_num_workers,
                 load_from_cache_file=not data_args.overwrite_cache,
             )
 
     # Metrics
-    metric = load_metric("seqeval")
+    metric = evaluate.load("seqeval")
 
     def compute_metrics(p):
         predictions, labels = p
