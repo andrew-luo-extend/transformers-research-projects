@@ -405,7 +405,19 @@ def main():
         labels_list = []
         
         for i in range(batch_size):
-            images.append(examples["image"][i])
+            image = examples["image"][i]
+            images.append(image)
+            
+            # Get image dimensions for normalization
+            # PIL Image has .size property (width, height)
+            if hasattr(image, 'size'):
+                img_width, img_height = image.size
+            elif hasattr(image, 'shape'):
+                # numpy array (height, width, channels)
+                img_height, img_width = image.shape[:2]
+            else:
+                # Fallback to a reasonable default
+                img_width, img_height = 1000, 1000
             
             # Extract objects for this example
             objects = examples["objects"][i]
@@ -414,13 +426,22 @@ def main():
             # Create placeholder words for each object (since object detection doesn't have text)
             words = ["[OBJ]"] * num_objects
             
-            # Extract bboxes - normalize if needed (LayoutLMv3 expects [x0, y0, x1, y1] format as integers)
+            # Extract bboxes and normalize to 0-1000 range (LayoutLMv3 standard)
+            # LayoutLMv3 position embeddings expect coordinates in 0-1000 range
             bboxes = []
             for bbox in objects["bbox"]:
                 # bbox is [x, y, width, height] format, convert to [x0, y0, x1, y1]
-                # LayoutLMv3 requires integer coordinates for embedding lookups
                 x, y, w, h = bbox
-                bboxes.append([int(x), int(y), int(x + w), int(y + h)])
+                x1, y1 = x + w, y + h
+                
+                # Normalize to 0-1000 range based on image dimensions
+                # Clamp to ensure we don't exceed the valid range
+                norm_x0 = int(min(max((x / img_width) * 1000, 0), 1000))
+                norm_y0 = int(min(max((y / img_height) * 1000, 0), 1000))
+                norm_x1 = int(min(max((x1 / img_width) * 1000, 0), 1000))
+                norm_y1 = int(min(max((y1 / img_height) * 1000, 0), 1000))
+                
+                bboxes.append([norm_x0, norm_y0, norm_x1, norm_y1])
             
             # Extract labels (use category_id)
             labels = objects["category_id"]
