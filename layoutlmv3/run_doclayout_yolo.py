@@ -284,6 +284,16 @@ def main():
         from doclayout_yolo import YOLOv10
         logger.info("✓ DocLayout-YOLO installed")
     
+    # Download baseline model for AMP check (required by YOLO)
+    logger.info("Setting up YOLO environment...")
+    try:
+        from ultralytics import YOLO
+        # This downloads yolov8n.pt if not present
+        _ = YOLO("yolov8n.pt")
+        logger.info("✓ YOLO environment ready")
+    except Exception as e:
+        logger.warning(f"YOLO setup warning: {e}. Continuing anyway...")
+    
     # Load pre-trained model
     logger.info(f"Loading pre-trained model: {args.model_name}")
     try:
