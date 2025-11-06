@@ -297,6 +297,18 @@ def main():
     # Data collator
     data_collator = DetectionCollator(image_processor)
     
+    # Check if max_steps is needed for streaming
+    if data_args.use_streaming and training_args.do_train:
+        if training_args.max_steps <= 0:
+            logger.warning(
+                "Streaming mode requires --max_steps to be set. "
+                "Example: For 20 samples with batch_size=1, use --max_steps 20"
+            )
+            raise ValueError(
+                "When using --use_streaming, you must specify --max_steps. "
+                "Calculate as: (num_samples / batch_size) * num_epochs"
+            )
+    
     # Trainer
     logger.info("Initializing Trainer...")
     trainer = Trainer(
@@ -305,7 +317,7 @@ def main():
         train_dataset=train_dataset if training_args.do_train else None,
         eval_dataset=eval_dataset if training_args.do_eval else None,
         data_collator=data_collator,
-        tokenizer=image_processor,  # For saving
+        processing_class=image_processor,  # Use processing_class instead of tokenizer
     )
     
     # Train
