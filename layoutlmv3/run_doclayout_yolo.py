@@ -315,25 +315,37 @@ def main():
     logger.info("Starting training...")
     logger.info("="*80)
     
-    results = model.train(
-        data=str(config_path),
-        epochs=args.epochs,
-        batch=args.batch_size,
-        imgsz=args.imgsz,
-        lr0=args.learning_rate,
-        device=args.device,
-        workers=args.workers,
-        project=args.output_dir,
-        name="train",
-        exist_ok=True,
-        pretrained=True,
-        optimizer='AdamW',
-        verbose=True,
-        val=True,
-        plots=True,
-        save=True,
-        save_period=1,  # Save every epoch
-    )
+    # Set environment to skip AMP check (causes issues with file paths)
+    os.environ['YOLO_AUTOINSTALL'] = 'False'
+    
+    # Change to output directory so yolov8n.pt can be found
+    original_dir = os.getcwd()
+    os.chdir(args.output_dir)
+    
+    try:
+        results = model.train(
+            data=str(config_path),
+            epochs=args.epochs,
+            batch=args.batch_size,
+            imgsz=args.imgsz,
+            lr0=args.learning_rate,
+            device=args.device,
+            workers=args.workers,
+            project=args.output_dir,
+            name="train",
+            exist_ok=True,
+            pretrained=True,
+            optimizer='AdamW',
+            verbose=True,
+            val=True,
+            plots=True,
+            save=True,
+            save_period=1,  # Save every epoch
+            amp=False,  # Disable AMP to skip the check
+        )
+    finally:
+        # Change back to original directory
+        os.chdir(original_dir)
     
     logger.info("="*80)
     logger.info("Training complete!")
