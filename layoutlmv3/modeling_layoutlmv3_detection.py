@@ -35,6 +35,17 @@ class ObjectDetectionOutput:
     pred_boxes: torch.FloatTensor = None
     pred_logits: torch.FloatTensor = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    
+    def __getitem__(self, index):
+        """Make subscriptable for Trainer compatibility"""
+        if index == 0:
+            return self.loss
+        elif index == 1:
+            return self.pred_logits
+        elif index == 2:
+            return self.pred_boxes
+        else:
+            raise IndexError(f"Index {index} out of range")
 
 
 def box_cxcywh_to_xyxy(boxes):
