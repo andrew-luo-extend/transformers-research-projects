@@ -414,12 +414,13 @@ def main():
             # Create placeholder words for each object (since object detection doesn't have text)
             words = ["[OBJ]"] * num_objects
             
-            # Extract bboxes - normalize if needed (LayoutLMv3 expects [x0, y0, x1, y1] format)
+            # Extract bboxes - normalize if needed (LayoutLMv3 expects [x0, y0, x1, y1] format as integers)
             bboxes = []
             for bbox in objects["bbox"]:
                 # bbox is [x, y, width, height] format, convert to [x0, y0, x1, y1]
+                # LayoutLMv3 requires integer coordinates for embedding lookups
                 x, y, w, h = bbox
-                bboxes.append([x, y, x + w, y + h])
+                bboxes.append([int(x), int(y), int(x + w), int(y + h)])
             
             # Extract labels (use category_id)
             labels = objects["category_id"]
