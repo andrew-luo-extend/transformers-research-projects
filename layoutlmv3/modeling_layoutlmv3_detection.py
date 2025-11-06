@@ -110,9 +110,15 @@ class HungarianMatcher(nn.Module):
         out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)
         out_bbox = outputs["pred_boxes"].flatten(0, 1)
         
+        # Concatenate targets - ensure 2D tensors
         target_ids = torch.cat([t["class_labels"] for t in targets])
         target_bbox = torch.cat([t["boxes"] for t in targets])
         
+        # Ensure target_bbox is 2D [num_targets, 4]
+        if target_bbox.dim() == 1:
+            target_bbox = target_bbox.unsqueeze(0)
+        
+        # Costs
         cost_class = -out_prob[:, target_ids]
         cost_bbox = torch.cdist(out_bbox, target_bbox, p=1)
         cost_giou = -generalized_box_iou(
@@ -120,9 +126,11 @@ class HungarianMatcher(nn.Module):
             box_cxcywh_to_xyxy(target_bbox)
         )
         
+        # Final cost matrix
         C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
         C = C.view(batch_size, num_queries, -1).cpu()
         
+        # Hungarian assignment per image
         sizes = [len(t["boxes"]) for t in targets]
         indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
         
