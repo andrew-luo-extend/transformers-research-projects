@@ -439,10 +439,18 @@ def main():
     # The processor does everything for us (prepare the image using LayoutLMv3ImageProcessor
     # and prepare the words, boxes and word-level labels using LayoutLMv3TokenizerFast)
     def prepare_examples(examples):
-        images = examples[image_column_name]
-        words = examples[text_column_name]
-        boxes = examples[boxes_column_name]
-        word_labels = examples[label_column_name]
+        # After commonforms conversion, columns are always: image, words, bboxes, ner_tags
+        # For FUNSD/CORD, use the detected column names
+        if data_args.dataset_name == "commonforms":
+            images = examples["image"]
+            words = examples["words"]
+            boxes = examples["bboxes"]
+            word_labels = examples["ner_tags"]
+        else:
+            images = examples[image_column_name]
+            words = examples[text_column_name]
+            boxes = examples[boxes_column_name]
+            word_labels = examples[label_column_name]
 
         encoding = processor(
             images,
