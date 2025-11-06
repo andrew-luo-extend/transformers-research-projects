@@ -341,8 +341,20 @@ class LayoutLMv3ForObjectDetection(LayoutLMv3PreTrainedModel):
     def loss_boxes(self, pred_boxes, targets, indices, num_boxes):
         """Box losses: L1 + GIoU"""
         idx = self._get_src_permutation_idx(indices)
+        
+        # Handle case where there are no matched boxes
+        if idx[0].numel() == 0:
+            # No boxes matched - return zero losses
+            device = pred_boxes.device
+            return torch.tensor(0.0, device=device), torch.tensor(0.0, device=device)
+        
         src_boxes = pred_boxes[idx]
-        target_boxes = torch.cat([t["boxes"][i] for t, (_, i) in zip(targets, indices)], dim=0)
+        target_boxes = torch.cat([t["boxes"][i] for t, (_, i) in zip(targets, indices) if len(i) > 0], dim=0)
+        
+        # Double check we have boxes
+        if src_boxes.numel() == 0 or target_boxes.numel() == 0:
+            device = pred_boxes.device
+            return torch.tensor(0.0, device=device), torch.tensor(0.0, device=device)
         
         loss_bbox = F.l1_loss(src_boxes, target_boxes, reduction='none').sum() / num_boxes
         loss_giou = (1 - torch.diag(generalized_box_iou(
