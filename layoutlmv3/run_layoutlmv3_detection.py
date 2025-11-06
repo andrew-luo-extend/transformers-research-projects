@@ -255,9 +255,12 @@ def main():
     
     # Load image processor
     logger.info("Loading image processor...")
-    image_processor = AutoImageProcessor.from_pretrained(
+    from transformers import LayoutLMv3ImageProcessor
+    
+    image_processor = LayoutLMv3ImageProcessor.from_pretrained(
         model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
+        apply_ocr=False,  # CRITICAL: Disable OCR, we only need visual features
         do_resize=True,
         size={"height": data_args.image_size, "width": data_args.image_size},
     )
