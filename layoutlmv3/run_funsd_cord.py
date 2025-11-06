@@ -312,16 +312,33 @@ def main():
         unique_labels = set()
         split_name = "train" if training_args.do_train else "test"
         
-        # Limit samples for label extraction to avoid long processing
-        max_samples_for_labels = 1000
-        sample_count = 0
+        # For streaming datasets, we can't iterate directly - need to handle differently
+        if data_args.use_streaming:
+            # For streaming mode, use a fixed set of expected labels or extract from limited samples
+            logger.info("Using streaming mode - extracting labels from first batch...")
+            sample_count = 0
+            max_samples_for_labels = 100  # Smaller for streaming
+            for example in dataset[split_name].take(max_samples_for_labels):
+                if "objects" in example and "category_id" in example["objects"]:
+                    unique_labels.update(example["objects"]["category_id"])
+                sample_count += 1
+                if sample_count >= max_samples_for_labels:
+                    break
+        else:
+            # For non-streaming, we can iterate normally
+            max_samples_for_labels = 1000
+            sample_count = 0
+            for example in dataset[split_name]:
+                if sample_count >= max_samples_for_labels:
+                    break
+                if "objects" in example and "category_id" in example["objects"]:
+                    unique_labels.update(example["objects"]["category_id"])
+                sample_count += 1
         
-        for example in dataset[split_name]:
-            if sample_count >= max_samples_for_labels:
-                break
-            if "objects" in example and "category_id" in example["objects"]:
-                unique_labels.update(example["objects"]["category_id"])
-            sample_count += 1
+        # If no labels found, use a default set
+        if not unique_labels:
+            logger.warning("No labels found in dataset samples, using default labels [0-9]")
+            unique_labels = set(range(10))
         
         label_list = sorted(list(unique_labels))
         id2label = {i: str(label) for i, label in enumerate(label_list)}
@@ -444,26 +461,42 @@ def main():
             raise ValueError("--do_train requires a train dataset")
         train_dataset = dataset["train"]
         if data_args.max_train_samples is not None:
-            train_dataset = train_dataset.select(range(data_args.max_train_samples))
+            # Handle streaming vs non-streaming datasets differently
+            if data_args.use_streaming:
+                train_dataset = train_dataset.take(data_args.max_train_samples)
+            else:
+                train_dataset = train_dataset.select(range(data_args.max_train_samples))
         with training_args.main_process_first(desc="train dataset map pre-processing"):
             # Convert commonforms format if needed
             if data_args.dataset_name == "commonforms":
+                # Streaming datasets don't support num_proc
+                map_kwargs = {
+                    "batched": True,
+                    "remove_columns": remove_columns,
+                }
+                if not data_args.use_streaming:
+                    map_kwargs["num_proc"] = data_args.preprocessing_num_workers
+                    map_kwargs["load_from_cache_file"] = not data_args.overwrite_cache
+                
                 train_dataset = train_dataset.map(
                     convert_commonforms_to_token_format,
-                    batched=True,
-                    remove_columns=remove_columns,
-                    num_proc=data_args.preprocessing_num_workers,
-                    load_from_cache_file=not data_args.overwrite_cache,
+                    **map_kwargs
                 )
                 # Update remove_columns for the next step
                 remove_columns = ["image", "words", "bboxes", "ner_tags"]
             
+            # Prepare mapping arguments (streaming doesn't support num_proc)
+            map_kwargs = {
+                "batched": True,
+                "remove_columns": remove_columns,
+            }
+            if not data_args.use_streaming:
+                map_kwargs["num_proc"] = data_args.preprocessing_num_workers
+                map_kwargs["load_from_cache_file"] = not data_args.overwrite_cache
+            
             train_dataset = train_dataset.map(
                 prepare_examples,
-                batched=True,
-                remove_columns=remove_columns,
-                num_proc=data_args.preprocessing_num_workers,
-                load_from_cache_file=not data_args.overwrite_cache,
+                **map_kwargs
             )
 
     if training_args.do_eval:
@@ -472,29 +505,46 @@ def main():
             raise ValueError("--do_eval requires a validation dataset")
         eval_dataset = dataset[validation_name]
         if data_args.max_eval_samples is not None:
-            eval_dataset = eval_dataset.select(range(data_args.max_eval_samples))
+            # Handle streaming vs non-streaming datasets differently
+            if data_args.use_streaming:
+                eval_dataset = eval_dataset.take(data_args.max_eval_samples)
+            else:
+                eval_dataset = eval_dataset.select(range(data_args.max_eval_samples))
         with training_args.main_process_first(desc="validation dataset map pre-processing"):
             # Convert commonforms format if needed
             if data_args.dataset_name == "commonforms":
                 # Re-get column names for eval dataset
-                eval_remove_columns = eval_dataset.column_names
+                # For streaming datasets, column_names is a property, not an attribute
+                eval_remove_columns = eval_dataset.column_names if hasattr(eval_dataset, 'column_names') else ["image", "objects"]
+                # Streaming datasets don't support num_proc
+                map_kwargs = {
+                    "batched": True,
+                    "remove_columns": eval_remove_columns,
+                }
+                if not data_args.use_streaming:
+                    map_kwargs["num_proc"] = data_args.preprocessing_num_workers
+                    map_kwargs["load_from_cache_file"] = not data_args.overwrite_cache
+                
                 eval_dataset = eval_dataset.map(
                     convert_commonforms_to_token_format,
-                    batched=True,
-                    remove_columns=eval_remove_columns,
-                    num_proc=data_args.preprocessing_num_workers,
-                    load_from_cache_file=not data_args.overwrite_cache,
+                    **map_kwargs
                 )
                 eval_remove_columns = ["image", "words", "bboxes", "ner_tags"]
             else:
                 eval_remove_columns = remove_columns
                 
+            # Prepare mapping arguments (streaming doesn't support num_proc)
+            map_kwargs = {
+                "batched": True,
+                "remove_columns": eval_remove_columns,
+            }
+            if not data_args.use_streaming:
+                map_kwargs["num_proc"] = data_args.preprocessing_num_workers
+                map_kwargs["load_from_cache_file"] = not data_args.overwrite_cache
+            
             eval_dataset = eval_dataset.map(
                 prepare_examples,
-                batched=True,
-                remove_columns=eval_remove_columns,
-                num_proc=data_args.preprocessing_num_workers,
-                load_from_cache_file=not data_args.overwrite_cache,
+                **map_kwargs
             )
 
     if training_args.do_predict:
@@ -502,30 +552,47 @@ def main():
             raise ValueError("--do_predict requires a test dataset")
         predict_dataset = dataset["test"]
         if data_args.max_predict_samples is not None:
-            max_predict_samples = min(len(predict_dataset), data_args.max_predict_samples)
-            predict_dataset = predict_dataset.select(range(max_predict_samples))
+            # Handle streaming vs non-streaming datasets differently
+            if data_args.use_streaming:
+                predict_dataset = predict_dataset.take(data_args.max_predict_samples)
+            else:
+                max_predict_samples = min(len(predict_dataset), data_args.max_predict_samples)
+                predict_dataset = predict_dataset.select(range(max_predict_samples))
         with training_args.main_process_first(desc="prediction dataset map pre-processing"):
             # Convert commonforms format if needed
             if data_args.dataset_name == "commonforms":
                 # Re-get column names for predict dataset
-                predict_remove_columns = predict_dataset.column_names
+                # For streaming datasets, column_names is a property, not an attribute
+                predict_remove_columns = predict_dataset.column_names if hasattr(predict_dataset, 'column_names') else ["image", "objects"]
+                # Streaming datasets don't support num_proc
+                map_kwargs = {
+                    "batched": True,
+                    "remove_columns": predict_remove_columns,
+                }
+                if not data_args.use_streaming:
+                    map_kwargs["num_proc"] = data_args.preprocessing_num_workers
+                    map_kwargs["load_from_cache_file"] = not data_args.overwrite_cache
+                
                 predict_dataset = predict_dataset.map(
                     convert_commonforms_to_token_format,
-                    batched=True,
-                    remove_columns=predict_remove_columns,
-                    num_proc=data_args.preprocessing_num_workers,
-                    load_from_cache_file=not data_args.overwrite_cache,
+                    **map_kwargs
                 )
                 predict_remove_columns = ["image", "words", "bboxes", "ner_tags"]
             else:
                 predict_remove_columns = remove_columns
                 
+            # Prepare mapping arguments (streaming doesn't support num_proc)
+            map_kwargs = {
+                "batched": True,
+                "remove_columns": predict_remove_columns,
+            }
+            if not data_args.use_streaming:
+                map_kwargs["num_proc"] = data_args.preprocessing_num_workers
+                map_kwargs["load_from_cache_file"] = not data_args.overwrite_cache
+            
             predict_dataset = predict_dataset.map(
                 prepare_examples,
-                batched=True,
-                remove_columns=predict_remove_columns,
-                num_proc=data_args.preprocessing_num_workers,
-                load_from_cache_file=not data_args.overwrite_cache,
+                **map_kwargs
             )
 
     # Metrics
