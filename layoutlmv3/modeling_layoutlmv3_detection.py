@@ -107,34 +107,55 @@ class HungarianMatcher(nn.Module):
         """Performs Hungarian matching"""
         batch_size, num_queries = outputs["pred_logits"].shape[:2]
         
-        out_prob = outputs["pred_logits"].flatten(0, 1).softmax(-1)
-        out_bbox = outputs["pred_boxes"].flatten(0, 1)
+        # Process each image separately to handle varying numbers of targets
+        indices = []
         
-        # Concatenate targets - ensure 2D tensors
-        target_ids = torch.cat([t["class_labels"] for t in targets])
-        target_bbox = torch.cat([t["boxes"] for t in targets])
+        for batch_idx in range(batch_size):
+            target = targets[batch_idx]
+            
+            # Handle empty targets (images with no objects)
+            if len(target["boxes"]) == 0:
+                # No objects - all predictions are no-object
+                indices.append((
+                    torch.tensor([], dtype=torch.int64),
+                    torch.tensor([], dtype=torch.int64)
+                ))
+                continue
+            
+            # Get predictions for this image
+            out_prob = outputs["pred_logits"][batch_idx].softmax(-1)  # [num_queries, num_classes+1]
+            out_bbox = outputs["pred_boxes"][batch_idx]  # [num_queries, 4]
+            
+            # Get targets for this image
+            target_ids = target["class_labels"]  # [num_targets]
+            target_bbox = target["boxes"]  # [num_targets, 4]
+            
+            # Ensure 2D
+            if target_bbox.dim() == 1:
+                target_bbox = target_bbox.unsqueeze(0)
+            
+            # Compute costs
+            cost_class = -out_prob[:, target_ids]  # [num_queries, num_targets]
+            cost_bbox = torch.cdist(out_bbox, target_bbox, p=1)  # [num_queries, num_targets]
+            cost_giou = -generalized_box_iou(
+                box_cxcywh_to_xyxy(out_bbox),
+                box_cxcywh_to_xyxy(target_bbox)
+            )  # [num_queries, num_targets]
+            
+            # Final cost matrix
+            C = (self.cost_bbox * cost_bbox + 
+                 self.cost_class * cost_class + 
+                 self.cost_giou * cost_giou)  # [num_queries, num_targets]
+            
+            # Hungarian assignment
+            pred_idx, target_idx = linear_sum_assignment(C.cpu())
+            
+            indices.append((
+                torch.as_tensor(pred_idx, dtype=torch.int64),
+                torch.as_tensor(target_idx, dtype=torch.int64)
+            ))
         
-        # Ensure target_bbox is 2D [num_targets, 4]
-        if target_bbox.dim() == 1:
-            target_bbox = target_bbox.unsqueeze(0)
-        
-        # Costs
-        cost_class = -out_prob[:, target_ids]
-        cost_bbox = torch.cdist(out_bbox, target_bbox, p=1)
-        cost_giou = -generalized_box_iou(
-            box_cxcywh_to_xyxy(out_bbox),
-            box_cxcywh_to_xyxy(target_bbox)
-        )
-        
-        # Final cost matrix
-        C = self.cost_bbox * cost_bbox + self.cost_class * cost_class + self.cost_giou * cost_giou
-        C = C.view(batch_size, num_queries, -1).cpu()
-        
-        # Hungarian assignment per image
-        sizes = [len(t["boxes"]) for t in targets]
-        indices = [linear_sum_assignment(c[i]) for i, c in enumerate(C.split(sizes, -1))]
-        
-        return [(torch.as_tensor(i, dtype=torch.int64), torch.as_tensor(j, dtype=torch.int64)) for i, j in indices]
+        return indices
 
 
 class MLP(nn.Module):
