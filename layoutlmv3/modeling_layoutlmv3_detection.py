@@ -16,7 +16,12 @@ Architecture:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import LayoutLMv3Model, LayoutLMv3PreTrainedModel, LayoutLMv3Config
+from transformers import LayoutLMv3PreTrainedModel, LayoutLMv3Config
+try:
+    from transformers import LayoutLMv3Model
+except ImportError:
+    LayoutLMv3Model = None
+    print("WARNING: LayoutLMv3Model not found in transformers. Install transformers>=4.30.0")
 from typing import Optional, Tuple, Dict, List
 from dataclasses import dataclass
 from scipy.optimize import linear_sum_assignment
@@ -179,16 +184,9 @@ class LayoutLMv3ForObjectDetection(LayoutLMv3PreTrainedModel):
         self.num_classes = num_classes
         self.num_queries = num_queries
         
-        # Ensure visual embeddings are enabled
-        if not hasattr(config, 'visual_embed'):
-            config.visual_embed = True
-        
-        # LayoutLMv3 visual encoder (document-aware features)
-        self.layoutlmv3 = LayoutLMv3Model(
-            config,
-            detection=False,
-            image_only=True
-        )
+        # LayoutLMv3 visual encoder (standard transformers version)
+        # We'll use the standard model and only pass images (no text)
+        self.layoutlmv3 = LayoutLMv3Model(config)
         
         # DETR detection head
         self.detection_head = DETRDetectionHead(config, num_classes, num_queries)
@@ -218,13 +216,30 @@ class LayoutLMv3ForObjectDetection(LayoutLMv3PreTrainedModel):
         """
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         
-        # LayoutLMv3 encoder
+        batch_size = pixel_values.shape[0]
+        device = pixel_values.device
+        
+        # LayoutLMv3 uses 'pixel_values' key from the processor output
+        # For detection, we only use visual features (no text)
+        # We need to create minimal text inputs as LayoutLMv3Model expects them
+        
+        # Minimal dummy inputs (will be ignored, we only use visual features)
+        input_ids = torch.zeros((batch_size, 1), dtype=torch.long, device=device)
+        attention_mask = torch.ones((batch_size, 1), dtype=torch.long, device=device)
+        bbox_input = torch.zeros((batch_size, 1, 4), dtype=torch.long, device=device)
+        
+        # LayoutLMv3 encoder - the standard transformers version uses 'pixel_values' parameter
         encoder_outputs = self.layoutlmv3(
-            images=pixel_values,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            bbox=bbox_input,
+            pixel_values=pixel_values,  # Visual input (standard transformers parameter name)
             output_hidden_states=output_hidden_states,
             return_dict=True,
         )
         
+        # Extract features - LayoutLMv3 output includes both text and visual tokens
+        # We want the visual portion for detection
         sequence_output = encoder_outputs.last_hidden_state
         
         # DETR detection head
