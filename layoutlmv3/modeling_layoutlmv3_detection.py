@@ -38,14 +38,24 @@ class ObjectDetectionOutput:
     
     def __getitem__(self, index):
         """Make subscriptable for Trainer compatibility"""
-        if index == 0:
-            return self.loss
-        elif index == 1:
-            return self.pred_logits
-        elif index == 2:
-            return self.pred_boxes
+        if isinstance(index, slice):
+            # Handle slices like outputs[1:]
+            # Convert to tuple for slicing
+            items = (self.loss, self.pred_logits, self.pred_boxes, self.hidden_states)
+            return items[index]
+        elif isinstance(index, int):
+            if index == 0:
+                return self.loss
+            elif index == 1:
+                return self.pred_logits
+            elif index == 2:
+                return self.pred_boxes
+            elif index == 3:
+                return self.hidden_states
+            else:
+                raise IndexError(f"Index {index} out of range")
         else:
-            raise IndexError(f"Index {index} out of range")
+            raise TypeError(f"Indices must be integers or slices, not {type(index).__name__}")
 
 
 def box_cxcywh_to_xyxy(boxes):
