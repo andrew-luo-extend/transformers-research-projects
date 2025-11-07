@@ -127,11 +127,33 @@ def convert_commonforms_to_yolo(dataset, output_dir, split_name, max_samples=Non
             
             x, y, w, h = bbox
             
+            # Clamp bbox to image boundaries (handle out-of-bounds boxes)
+            x = max(0, x)
+            y = max(0, y)
+            x = min(x, img_width - 1)
+            y = min(y, img_height - 1)
+            
+            # Adjust width/height if bbox extends beyond image
+            if x + w > img_width:
+                w = img_width - x
+            if y + h > img_height:
+                h = img_height - y
+            
+            # Skip if bbox has zero or negative dimensions after clamping
+            if w <= 0 or h <= 0:
+                continue
+            
             # Convert to YOLO format: [x_center, y_center, width, height] normalized 0-1
             x_center = (x + w / 2) / img_width
             y_center = (y + h / 2) / img_height
             w_norm = w / img_width
             h_norm = h / img_height
+            
+            # Final validation: ensure all values are in [0, 1]
+            if x_center < 0 or x_center > 1 or y_center < 0 or y_center > 1:
+                continue
+            if w_norm <= 0 or w_norm > 1 or h_norm <= 0 or h_norm > 1:
+                continue
             
             # YOLO format: class_id x_center y_center width height
             label_lines.append(f"{category_id} {x_center:.6f} {y_center:.6f} {w_norm:.6f} {h_norm:.6f}")
