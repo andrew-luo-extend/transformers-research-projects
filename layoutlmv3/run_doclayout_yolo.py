@@ -68,6 +68,18 @@ def convert_commonforms_to_yolo(dataset, output_dir, split_name, max_samples=Non
     image_paths = []
     
     for idx, example in enumerate(tqdm(dataset, desc=f"Processing {split_name}")):
+        # Resume support: skip if already converted
+        image_filename = f"{split_name}_{idx:06d}.jpg"
+        image_path = images_dir / image_filename
+        label_path = labels_dir / f"{split_name}_{idx:06d}.txt"
+        
+        if image_path.exists() and label_path.exists():
+            image_paths.append(str(image_path))
+            sample_count += 1
+            if max_samples and sample_count >= max_samples:
+                break
+            continue
+        
         # Get image
         image = example["image"]
         
@@ -79,14 +91,29 @@ def convert_commonforms_to_yolo(dataset, output_dir, split_name, max_samples=Non
         else:
             continue
         
-        # Save image
-        image_filename = f"{split_name}_{idx:06d}.jpg"
-        image_path = images_dir / image_filename
+        # Save image (with error handling for corrupt/oversized images)
         
-        if isinstance(image, Image.Image):
-            image.save(image_path)
-        else:
-            Image.fromarray(image).save(image_path)
+        try:
+            # Check if image is too large and resize if needed
+            if hasattr(image, 'size'):
+                width, height = image.size
+                max_dim = 65000  # PIL's maximum
+                
+                if width > max_dim or height > max_dim:
+                    # Resize to fit within limits
+                    scale = max_dim / max(width, height)
+                    new_width = int(width * scale)
+                    new_height = int(height * scale)
+                    image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                    logger.warning(f"Resized oversized image {idx}: {width}x{height} -> {new_width}x{new_height}")
+            
+            if isinstance(image, Image.Image):
+                image.save(image_path, quality=95)
+            else:
+                Image.fromarray(image).save(image_path, quality=95)
+        except Exception as e:
+            logger.warning(f"Failed to save image {idx}: {e}. Skipping...")
+            continue
         
         image_paths.append(str(image_path))
         
