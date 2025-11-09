@@ -253,22 +253,29 @@ def main():
         
         # Process with image processor
         images = coco_data['image']
-        annotations = coco_data['annotations']
+        annotations_list = coco_data['annotations']
         
-        # DETR expects annotations in specific format
-        targets = []
-        for ann in annotations:
-            target = {
-                'class_labels': torch.tensor(ann['category_id']),
-                'boxes': torch.tensor(ann['bbox']),
-                'area': torch.tensor(ann['area']),
-                'iscrowd': torch.tensor(ann['iscrowd']),
-                'image_id': torch.tensor(ann['image_id'][0] if ann['image_id'] else 0),
-            }
-            targets.append(target)
+        # DETR image processor expects annotations as list of dicts with 'image_id' and 'annotations' keys
+        # Each annotation in the 'annotations' list should have: category_id, bbox, area, iscrowd
+        formatted_annotations = []
+        for i, ann in enumerate(annotations_list):
+            # Convert to list of individual annotation dicts
+            individual_annotations = []
+            for j in range(len(ann['category_id'])):
+                individual_annotations.append({
+                    'category_id': ann['category_id'][j],
+                    'bbox': ann['bbox'][j],
+                    'area': ann['area'][j],
+                    'iscrowd': ann['iscrowd'][j],
+                })
+            
+            formatted_annotations.append({
+                'image_id': i,
+                'annotations': individual_annotations
+            })
         
-        # Process images
-        encoding = image_processor(images=images, annotations=targets, return_tensors="pt")
+        # Process images with formatted annotations
+        encoding = image_processor(images=images, annotations=formatted_annotations, return_tensors="pt")
         
         return encoding
     
