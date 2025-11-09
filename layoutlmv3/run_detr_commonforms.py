@@ -188,9 +188,9 @@ def main():
         streaming=data_args.use_streaming,
     )
     
-    # Get splits
+    # Get splits (CommonForms uses "train", "val", "test")
     train_dataset = dataset["train"]
-    eval_dataset = dataset.get("validation", dataset.get("test"))
+    eval_dataset = dataset.get("val", dataset.get("test"))
     
     # Limit samples
     if data_args.max_train_samples:

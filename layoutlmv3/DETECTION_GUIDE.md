@@ -5,19 +5,20 @@
 ## What This Is
 
 A hybrid model combining:
+
 - **LayoutLMv3 Visual Encoder**: Document-aware features (pre-trained on 11M documents)
 - **DETR Detection Head**: Transformer-based object detection with set prediction
 - **Hungarian Matching**: Optimal assignment of predictions to targets
 
 ## Why This is Best for Empty Form Fields
 
-| Feature | Advantage |
-|---------|-----------|
-| **LayoutLMv3 Encoder** | Understands document layouts, form structures, field alignment |
-| **Document Pre-training** | Trained on 11M docs - knows what empty fields look like |
-| **DETR Head** | Transformer reasoning over spatial relationships |
-| **Visual-only Mode** | Perfect for empty fields (no text to process) |
-| **Set Prediction** | No NMS needed, cleaner predictions |
+| Feature                   | Advantage                                                      |
+| ------------------------- | -------------------------------------------------------------- |
+| **LayoutLMv3 Encoder**    | Understands document layouts, form structures, field alignment |
+| **Document Pre-training** | Trained on 11M docs - knows what empty fields look like        |
+| **DETR Head**             | Transformer reasoning over spatial relationships               |
+| **Visual-only Mode**      | Perfect for empty fields (no text to process)                  |
+| **Set Prediction**        | No NMS needed, cleaner predictions                             |
 
 **Expected Accuracy: 92-96%** on empty form field detection
 
@@ -142,12 +143,14 @@ Output: Bounding Boxes + Class Labels
 ## Key Arguments
 
 ### Model
+
 - `--model_name_or_path`: Base LayoutLMv3 model (default: microsoft/layoutlmv3-base)
 - `--num_queries`: Number of detection queries (default: 100)
   - Increase for more objects: `--num_queries 300`
   - Decrease for fewer: `--num_queries 50`
 
 ### Data
+
 - `--dataset_name`: Dataset name (jbarrow/CommonForms)
 - `--use_streaming`: Stream data (no 308GB download)
 - `--image_size`: Input size (default: 224)
@@ -156,6 +159,7 @@ Output: Bounding Boxes + Class Labels
 - `--max_train_samples`: Limit for testing
 
 ### Training
+
 - `--num_train_epochs`: Training epochs (50-100 recommended)
 - `--per_device_train_batch_size`: Batch size (1-4 depending on GPU)
 - `--gradient_accumulation_steps`: Simulate larger batches
@@ -167,12 +171,12 @@ Output: Bounding Boxes + Class Labels
 ## Memory Requirements
 
 | Batch Size | Image Size | Num Queries | GPU Memory | Recommended GPU |
-|------------|------------|-------------|------------|-----------------|
-| 1 | 224 | 100 | ~12GB | RTX 3090 |
-| 2 | 224 | 100 | ~20GB | RTX A5000 |
-| 4 | 224 | 100 | ~36GB | A100 40GB |
-| 2 | 384 | 100 | ~30GB | A100 40GB |
-| 4 | 384 | 200 | ~60GB | A100 80GB |
+| ---------- | ---------- | ----------- | ---------- | --------------- |
+| 1          | 224        | 100         | ~12GB      | RTX 3090        |
+| 2          | 224        | 100         | ~20GB      | RTX A5000       |
+| 4          | 224        | 100         | ~36GB      | A100 40GB       |
+| 2          | 384        | 100         | ~30GB      | A100 40GB       |
+| 4          | 384        | 200         | ~60GB      | A100 80GB       |
 
 **Tip:** Use `--gradient_accumulation_steps 4` with `--per_device_train_batch_size 1` to simulate batch size 4 on smaller GPUs.
 
@@ -182,12 +186,12 @@ Output: Bounding Boxes + Class Labels
 
 For full CommonForms dataset (~435K training samples):
 
-| GPU | Batch Size (effective) | Time/Epoch | Total (50 epochs) |
-|-----|----------------------|------------|-------------------|
-| RTX 3090 | 4 (1×4 accum) | ~20 hours | ~42 days ⚠️ |
-| RTX A5000 | 8 (2×4 accum) | ~12 hours | ~25 days |
-| A100 40GB | 16 (4×4 accum) | ~8 hours | ~16 days |
-| A100 80GB | 32 (8×4 accum) | ~5 hours | ~10 days |
+| GPU       | Batch Size (effective) | Time/Epoch | Total (50 epochs) |
+| --------- | ---------------------- | ---------- | ----------------- |
+| RTX 3090  | 4 (1×4 accum)          | ~20 hours  | ~42 days ⚠️       |
+| RTX A5000 | 8 (2×4 accum)          | ~12 hours  | ~25 days          |
+| A100 40GB | 16 (4×4 accum)         | ~8 hours   | ~16 days          |
+| A100 80GB | 32 (8×4 accum)         | ~5 hours   | ~10 days          |
 
 **Note:** Detection is slower than classification. Consider using subset of data or streaming mode.
 
@@ -195,12 +199,12 @@ For full CommonForms dataset (~435K training samples):
 
 ## Comparison vs Other Approaches
 
-| Approach | Accuracy | Dev Time | Training Time | Complexity |
-|----------|----------|----------|---------------|------------|
-| **LayoutLMv3+DETR (this)** | **92-96%** | 1 day | 10-40 days | High |
-| Standard DETR | 90-94% | 4 hours | 5-15 days | Low |
-| YOLO | 88-92% | 2 hours | 2-8 days | Low |
-| LayoutLMv3 Token Class | N/A | 2 hours | 1-3 days | Low |
+| Approach                   | Accuracy   | Dev Time | Training Time | Complexity |
+| -------------------------- | ---------- | -------- | ------------- | ---------- |
+| **LayoutLMv3+DETR (this)** | **92-96%** | 1 day    | 10-40 days    | High       |
+| Standard DETR              | 90-94%     | 4 hours  | 5-15 days     | Low        |
+| YOLO                       | 88-92%     | 2 hours  | 2-8 days      | Low        |
+| LayoutLMv3 Token Class     | N/A        | 2 hours  | 1-3 days      | Low        |
 
 **Trade-off:** +2-6% accuracy for +3x training time and complexity.
 
@@ -245,6 +249,7 @@ for i, pred in enumerate(predictions):
 ## Troubleshooting
 
 ### Out of Memory
+
 ```bash
 # Reduce batch size
 --per_device_train_batch_size 1
@@ -258,6 +263,7 @@ for i, pred in enumerate(predictions):
 ```
 
 ### Slow Training
+
 ```bash
 # Use subset for faster iteration
 --max_train_samples 10000
@@ -270,6 +276,7 @@ for i, pred in enumerate(predictions):
 ```
 
 ### Poor Detection Quality
+
 ```bash
 # Increase queries (detect more objects)
 --num_queries 200
@@ -286,6 +293,7 @@ for i, pred in enumerate(predictions):
 ## Why This Works for Empty Fields
 
 **Empty form fields have visual cues:**
+
 - Rectangular borders
 - Underlines
 - Dotted lines
@@ -294,12 +302,14 @@ for i, pred in enumerate(predictions):
 - Consistent sizing
 
 **LayoutLMv3 excels at these because:**
+
 - Pre-trained on millions of forms
 - Understands document structure
 - Recognizes field patterns
 - Spatially aware (alignment, positioning)
 
 **DETR adds:**
+
 - Set-based prediction (no NMS)
 - Global reasoning over all fields
 - Handles variable numbers of objects
@@ -324,17 +334,20 @@ layoutlmv3/
 If this is too slow or complex, consider:
 
 **Plan B: Standard DETR**
+
 ```bash
 python run_detr_commonforms.py \
   --model_name_or_path facebook/detr-resnet-50 \
   --dataset_name jbarrow/CommonForms \
   ...
 ```
+
 - **90-94% accuracy** (only 2-4% less)
 - **5-15 days training** (2-3x faster)
 - **Much simpler**
 
 **Plan C: YOLO**
+
 - **88-92% accuracy**
 - **2-8 days training** (fastest)
 - Industry standard, tons of support
@@ -345,13 +358,13 @@ python run_detr_commonforms.py \
 
 **Expected Results on CommonForms:**
 
-| Metric | Value |
-|--------|-------|
-| **mAP@0.5** | 92-94% |
-| **mAP@0.75** | 88-92% |
+| Metric           | Value  |
+| ---------------- | ------ |
+| **mAP@0.5**      | 92-94% |
+| **mAP@0.75**     | 88-92% |
 | **mAP@0.5:0.95** | 85-90% |
-| **Precision** | 91-95% |
-| **Recall** | 89-94% |
+| **Precision**    | 91-95% |
+| **Recall**       | 89-94% |
 
 These are estimates based on similar document detection tasks.
 
@@ -366,4 +379,3 @@ These are estimates based on similar document detection tasks.
 5. ✅ Use for inference on new forms
 
 Ready to detect those empty form fields with maximum accuracy! 🎯
-

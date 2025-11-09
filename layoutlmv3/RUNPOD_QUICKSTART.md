@@ -52,7 +52,6 @@ huggingface-cli whoami
 ```bash
 python run_funsd_cord.py \
   --dataset_name commonforms \
-  --use_streaming \
   --model_name_or_path microsoft/layoutlmv3-base \
   --cache_dir /workspace/hf-cache \
   --output_dir /workspace/test_output \
@@ -146,12 +145,14 @@ python run_funsd_cord.py \
 ## 📊 Monitoring
 
 ### GPU Usage
+
 ```bash
 # In new terminal
 watch -n 1 nvidia-smi
 ```
 
 ### Training Progress
+
 ```bash
 # Reattach to tmux
 tmux attach -t training
@@ -161,6 +162,7 @@ tail -f /workspace/output/trainer_log.txt
 ```
 
 ### Disk Usage
+
 ```bash
 # Check volume usage
 df -h /workspace
@@ -173,21 +175,23 @@ du -sh /workspace/hf-cache
 
 ## 🔧 Tmux Quick Reference
 
-| Command | Action |
-|---------|--------|
-| `tmux new -s training` | Create new session named "training" |
-| `Ctrl+B, then D` | Detach from session (keeps running) |
-| `tmux attach -t training` | Reattach to session |
-| `tmux ls` | List all sessions |
-| `tmux kill-session -t training` | Kill session |
-| `exit` | Exit and close session (inside tmux) |
+| Command                         | Action                               |
+| ------------------------------- | ------------------------------------ |
+| `tmux new -s training`          | Create new session named "training"  |
+| `Ctrl+B, then D`                | Detach from session (keeps running)  |
+| `tmux attach -t training`       | Reattach to session                  |
+| `tmux ls`                       | List all sessions                    |
+| `tmux kill-session -t training` | Kill session                         |
+| `exit`                          | Exit and close session (inside tmux) |
 
 ---
 
 ## ⚠️ Important Notes
 
 ### Volume Storage
+
 ✅ **Everything saves to `/workspace/` (network volume)**
+
 - Dataset cache: `/workspace/hf-cache/datasets` (~308GB)
 - Model checkpoints: `/workspace/output`
 - Survives pod termination
@@ -195,6 +199,7 @@ du -sh /workspace/hf-cache
 ❌ **Avoid `/root/` (container disk - limited to ~50GB)**
 
 ### Key Arguments
+
 - `--cache_dir /workspace/hf-cache` - Use volume (REQUIRED)
 - `--eval_strategy epoch` - NOT `--evaluation_strategy`
 - `--use_streaming` - No download (slower training)
@@ -203,6 +208,7 @@ du -sh /workspace/hf-cache
 ### Troubleshooting
 
 **Disk quota exceeded:**
+
 ```bash
 # Check environment variables
 echo $HF_DATASETS_CACHE
@@ -214,6 +220,7 @@ export HF_HOME=/workspace/hf-cache
 ```
 
 **Out of memory:**
+
 ```bash
 # Reduce batch size
 --per_device_train_batch_size 4
@@ -242,11 +249,13 @@ export HF_HOME=/workspace/hf-cache
 ## 🎉 After Training Completes
 
 Your model is automatically uploaded to:
+
 ```
 https://huggingface.co/your-username/layoutlmv3-commonforms
 ```
 
 To use it:
+
 ```python
 from transformers import AutoModelForTokenClassification
 
@@ -267,4 +276,3 @@ model = AutoModelForTokenClassification.from_pretrained(
 ---
 
 **Need help?** See full guide: `RUNPOD_GUIDE.md`
-
