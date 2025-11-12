@@ -34,6 +34,11 @@ accelerate launch run_deformable_detr_commonforms_v2.py \
 IMPORTANT: Do NOT use --fp16 or --bf16 with Deformable DETR. The Hungarian matcher's
 GIoU calculations will overflow in float16, causing "matrix contains invalid numeric
 entries" errors. Train in full float32 precision.
+
+This script includes defensive safeguards:
+- Comprehensive bbox validation (NaN/Inf/degenerate boxes are filtered)
+- Safe Hungarian matcher (monkey-patches scipy to handle any NaN/Inf gracefully)
+- Early warning system (sanity check validates first batch before training)
 """
 
 from __future__ import annotations
@@ -47,6 +52,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import albumentations as A
 import numpy as np
+import scipy.optimize
 import torch
 from PIL import Image
 from datasets import Dataset, IterableDataset, load_dataset
@@ -60,6 +66,57 @@ from transformers import (
     TrainingArguments,
     set_seed,
 )
+
+# ============================================================================
+# Monkey-patch scipy.optimize.linear_sum_assignment to handle NaN/Inf gracefully
+# ============================================================================
+# This defensive guard prevents "matrix contains invalid numeric entries" errors
+# in the Hungarian matcher by replacing NaN/Inf with large finite costs.
+# Based on the fix from RF-DETR: https://github.com/Westlake-AI/SSCMA/issues/82
+
+_original_linear_sum_assignment = scipy.optimize.linear_sum_assignment
+
+
+def safe_linear_sum_assignment(cost_matrix, *args, **kwargs):
+    """Wrapper around linear_sum_assignment that sanitizes NaN/Inf values.
+
+    If the cost matrix contains NaN or Inf values, they are replaced with
+    a large finite cost (max_finite_cost + 1e4) so they are never chosen
+    by the Hungarian algorithm.
+
+    This prevents ValueError: "matrix contains invalid numeric entries"
+    while still allowing the matcher to function correctly.
+    """
+    cost_matrix = np.asarray(cost_matrix, dtype=np.float64)
+
+    # Detect invalid entries (NaN or Inf)
+    finite_mask = np.isfinite(cost_matrix)
+
+    if not finite_mask.all():
+        # There are NaN or Inf values - need to sanitize
+        if finite_mask.any():
+            # Some finite values exist - use max as baseline
+            max_cost = cost_matrix[finite_mask].max()
+        else:
+            # Everything is NaN/Inf - use zero as baseline
+            max_cost = 0.0
+
+        # Make a copy to avoid mutating upstream tensors
+        cost_matrix = cost_matrix.copy()
+
+        # Assign huge cost to invalid entries so they are never chosen
+        cost_matrix[~finite_mask] = max_cost + 1e4
+
+        # Log warning about sanitization
+        num_invalid = (~finite_mask).sum()
+        logger = logging.getLogger(__name__)
+        logger.debug(f"Sanitized {num_invalid} NaN/Inf entries in Hungarian cost matrix")
+
+    return _original_linear_sum_assignment(cost_matrix, *args, **kwargs)
+
+
+# Apply the monkey-patch
+scipy.optimize.linear_sum_assignment = safe_linear_sum_assignment
 
 
 logger = logging.getLogger(__name__)
