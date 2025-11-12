@@ -114,24 +114,50 @@ def convert_commonforms_to_coco_format(examples):
         objects = examples["objects"][i]
         num_objects = len(objects["bbox"])
         
-        # Convert bboxes to COCO format
+        # Convert bboxes to COCO format with validation
         coco_bboxes = []
-        for bbox in objects["bbox"]:
-            # bbox is already [x, y, w, h] - perfect for COCO format
-            # But ensure they're floats
-            x, y, w, h = bbox
-            coco_bboxes.append([float(x), float(y), float(w), float(h)])
+        valid_categories = []
+        valid_areas = []
         
-        # Calculate areas
-        areas = [bbox[2] * bbox[3] for bbox in coco_bboxes]
+        for idx, bbox in enumerate(objects["bbox"]):
+            # bbox is [x, y, w, h]
+            x, y, w, h = bbox
+            
+            # Convert to float
+            x, y, w, h = float(x), float(y), float(w), float(h)
+            
+            # Skip invalid boxes (negative dims, NaN, inf)
+            if w <= 0 or h <= 0 or x < 0 or y < 0:
+                continue
+            if not (0 <= x < img_width and 0 <= y < img_height):
+                continue
+                
+            # Clip to image bounds
+            x = max(0.0, min(x, img_width - 1.0))
+            y = max(0.0, min(y, img_height - 1.0))
+            w = max(1.0, min(w, img_width - x))
+            h = max(1.0, min(h, img_height - y))
+            
+            # Final validation
+            if w > 0 and h > 0:
+                coco_bboxes.append([x, y, w, h])
+                valid_categories.append(int(objects["category_id"][idx]))
+                valid_areas.append(w * h)
+        
+        # Skip images with no valid boxes
+        if len(coco_bboxes) == 0:
+            # Add a dummy box to avoid empty annotations
+            coco_bboxes = [[0.0, 0.0, 1.0, 1.0]]
+            valid_categories = [0]
+            valid_areas = [1.0]
         
         # Create COCO-style annotations
         annotations = {
-            'image_id': [i] * num_objects,
-            'category_id': [int(cat_id) for cat_id in objects["category_id"]],
-            'area': areas,
+            'image_id': [i] * len(coco_bboxes),
+            'category_id': valid_categories,
+            'area': valid_areas,
             'bbox': coco_bboxes,
-            'iscrowd': [0] * num_objects,  # No crowd annotations
+            'iscrowd': [0] * len(coco_bboxes),
         }
         
         annotations_list.append(annotations)
@@ -297,25 +323,37 @@ def main():
     
     # Apply preprocessing
     logger.info("Preprocessing datasets...")
+    logger.info("This may take a while for large datasets...")
+    
+    # Determine number of workers (avoid deadlocks with small datasets)
+    num_workers = 1 if data_args.max_train_samples and data_args.max_train_samples < 100 else 4
+    logger.info(f"Using {num_workers} worker(s) for preprocessing")
     
     if data_args.use_streaming:
         # For streaming, we can't use map with num_proc
+        logger.info("Using streaming mode - preprocessing on-the-fly")
         train_dataset = train_dataset.map(preprocess_batch, batched=True, remove_columns=train_dataset.column_names)
         if eval_dataset:
             eval_dataset = eval_dataset.map(preprocess_batch, batched=True, remove_columns=eval_dataset.column_names)
     else:
+        logger.info(f"Preprocessing training dataset...")
         train_dataset = train_dataset.map(
             preprocess_batch,
             batched=True,
             remove_columns=train_dataset.column_names,
-            num_proc=4,
+            num_proc=num_workers,
+            desc="Preprocessing training data",
+            load_from_cache_file=True,
         )
         if eval_dataset:
+            logger.info(f"Preprocessing evaluation dataset...")
             eval_dataset = eval_dataset.map(
                 preprocess_batch,
                 batched=True,
                 remove_columns=eval_dataset.column_names,
-                num_proc=4,
+                num_proc=num_workers,
+                desc="Preprocessing evaluation data",
+                load_from_cache_file=True,
             )
     
     # Initialize Trainer
