@@ -143,7 +143,7 @@ class RunPodArguments:
         default="hf-cache",
         metadata={"help": "Sub-directory under workspace for Hugging Face caches."},
     )
-    log_level: str = field(
+    runpod_log_level: str = field(
         default="INFO",
         metadata={"help": "Logging level (DEBUG, INFO, WARNING, ERROR)."},
     )
@@ -602,7 +602,7 @@ def main() -> None:
     else:
         model_args, data_args, runpod_args, training_args = parser.parse_args_into_dataclasses()
 
-    setup_logging(runpod_args.log_level)
+    setup_logging(runpod_args.runpod_log_level)
     apply_runpod_defaults(model_args, runpod_args, training_args)
 
     logger.info("=" * 80)
