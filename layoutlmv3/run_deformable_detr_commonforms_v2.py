@@ -334,7 +334,10 @@ def formatted_annotations(image_id: int, category_ids: Sequence[int], bboxes: Se
 
 
 def create_transforms(image_size: int, is_train: bool) -> A.Compose:
-    """Albumentations pipelines for train/eval."""
+    """Albumentations pipelines for train/eval.
+
+    Note: Albumentations expects RGB images and COCO format bboxes [x, y, width, height].
+    """
     if is_train:
         return A.Compose(
             [
@@ -346,14 +349,24 @@ def create_transforms(image_size: int, is_train: bool) -> A.Compose:
                 A.Rotate(limit=10, p=0.5),
                 A.RandomScale(scale_limit=0.2, p=0.5),
             ],
-            bbox_params=A.BboxParams(format="coco", label_fields=["category_id"]),
+            bbox_params=A.BboxParams(
+                format="coco",
+                label_fields=["category_id"],
+                min_area=1.0,
+                min_visibility=0.1,
+            ),
         )
     return A.Compose(
         [
             A.LongestMaxSize(image_size),
             A.PadIfNeeded(image_size, image_size, border_mode=0, value=(0, 0, 0)),
         ],
-        bbox_params=A.BboxParams(format="coco", label_fields=["category_id"]),
+        bbox_params=A.BboxParams(
+            format="coco",
+            label_fields=["category_id"],
+            min_area=1.0,
+            min_visibility=0.1,
+        ),
     )
 
 
@@ -381,6 +394,23 @@ def _to_numpy_rgb(image: Any) -> np.ndarray:
     raise TypeError(f"Unsupported image type: {type(image)}")
 
 
+def validate_bbox_format(bbox: Sequence[float], img_w: int, img_h: int) -> bool:
+    """Check if bbox is in valid COCO format [x, y, width, height]."""
+    if len(bbox) != 4:
+        return False
+    x, y, w, h = bbox
+    # Check for valid values
+    if not all(np.isfinite([x, y, w, h])):
+        return False
+    # COCO format: x, y should be non-negative, w, h should be positive
+    if x < 0 or y < 0 or w <= 0 or h <= 0:
+        return False
+    # Boxes should be within reasonable bounds (allow some tolerance for normalization issues)
+    if x > img_w * 2 or y > img_h * 2:
+        return False
+    return True
+
+
 def preprocess_examples(
     examples: Dict[str, Any],
     transform: A.Compose,
@@ -400,12 +430,15 @@ def preprocess_examples(
 
     processed_images: List[np.ndarray] = []
     processed_targets: List[Dict[str, Any]] = []
+    skip_reasons: Dict[str, int] = {}
+    debug_logged = False  # Only log detailed debug info for first sample
 
     for idx, (image_id, image, objects) in enumerate(zip(image_ids, images, objects_list)):
         try:
             image_np = _to_numpy_rgb(image)
         except Exception as exc:
             logger.warning("Skipping sample %s due to image conversion error: %s", image_id, exc)
+            skip_reasons["image_conversion_error"] = skip_reasons.get("image_conversion_error", 0) + 1
             continue
 
         if objects is None:
@@ -414,10 +447,45 @@ def preprocess_examples(
         raw_bboxes = objects.get("bbox") or objects.get("boxes") or []
         raw_categories = objects.get(category_key) or []
 
-        if len(raw_bboxes) != len(raw_categories):
-            min_len = min(len(raw_bboxes), len(raw_categories))
-            raw_bboxes = raw_bboxes[:min_len]
-            raw_categories = raw_categories[:min_len]
+        # Debug logging for first sample
+        if not debug_logged:
+            logger.info("First sample debug info:")
+            logger.info(f"  Image ID: {image_id}")
+            logger.info(f"  Image shape: {image_np.shape}")
+            logger.info(f"  Objects keys: {list(objects.keys()) if objects else 'None'}")
+            logger.info(f"  Category key: {category_key}")
+            logger.info(f"  Raw bboxes count: {len(raw_bboxes)}")
+            logger.info(f"  Raw categories count: {len(raw_categories)}")
+            if raw_bboxes:
+                logger.info(f"  First bbox: {raw_bboxes[0]}")
+            if raw_categories:
+                logger.info(f"  First category: {raw_categories[0]}")
+            debug_logged = True
+
+        # Skip samples with no annotations
+        if not raw_bboxes or not raw_categories:
+            logger.debug("Skipping sample %s: no bounding boxes or categories", image_id)
+            skip_reasons["no_annotations"] = skip_reasons.get("no_annotations", 0) + 1
+            continue
+
+        # Validate bbox format
+        img_h, img_w = image_np.shape[:2]
+        valid_bboxes = []
+        valid_categories = []
+        for bbox, cat in zip(raw_bboxes, raw_categories):
+            if validate_bbox_format(bbox, img_w, img_h):
+                valid_bboxes.append(bbox)
+                valid_categories.append(cat)
+            else:
+                logger.debug(f"Invalid bbox format in sample {image_id}: {bbox}")
+
+        if not valid_bboxes:
+            logger.debug("Skipping sample %s: no valid bboxes after format validation", image_id)
+            skip_reasons["invalid_bbox_format"] = skip_reasons.get("invalid_bbox_format", 0) + 1
+            continue
+
+        raw_bboxes = valid_bboxes
+        raw_categories = valid_categories
 
         mapped_categories: List[int] = []
         for cat in raw_categories:
@@ -425,11 +493,17 @@ def preprocess_examples(
                 cat = cat.item()
             mapped_categories.append(int(category_id_remap.get(cat, 0)))
 
-        albumentations_inputs = transform(
-            image=image_np[:, :, ::-1],  # Albumentations expects BGR
-            bboxes=raw_bboxes,
-            category_id=mapped_categories,
-        )
+        # Albumentations expects RGB, not BGR
+        try:
+            albumentations_inputs = transform(
+                image=image_np,
+                bboxes=raw_bboxes,
+                category_id=mapped_categories,
+            )
+        except Exception as exc:
+            logger.warning("Skipping sample %s due to augmentation error: %s", image_id, exc)
+            skip_reasons["augmentation_error"] = skip_reasons.get("augmentation_error", 0) + 1
+            continue
 
         img_transformed = albumentations_inputs["image"]
         img_h, img_w = img_transformed.shape[:2]
@@ -453,9 +527,11 @@ def preprocess_examples(
 
         if not transformed_bboxes or not transformed_categories:
             logger.debug("Skipping sample %s after augmentation: no valid boxes.", image_id)
+            skip_reasons["no_valid_boxes_after_aug"] = skip_reasons.get("no_valid_boxes_after_aug", 0) + 1
             continue
         if not all(np.isfinite(bbox).all() for bbox in transformed_bboxes):
             logger.debug("Skipping sample %s after augmentation: non-finite bbox detected.", image_id)
+            skip_reasons["non_finite_bbox"] = skip_reasons.get("non_finite_bbox", 0) + 1
             continue
 
         if isinstance(image_id, (int, np.integer)):
@@ -466,7 +542,8 @@ def preprocess_examples(
             except (TypeError, ValueError):
                 target_image_id = idx
 
-        processed_images.append(img_transformed[:, :, ::-1].astype(np.uint8))  # Convert back to RGB
+        # Image is already in RGB format from Albumentations
+        processed_images.append(img_transformed.astype(np.uint8))
         processed_targets.append(
             {
                 "image_id": target_image_id,
@@ -475,7 +552,25 @@ def preprocess_examples(
         )
 
     if not processed_images:
-        raise ValueError("All samples were skipped during preprocessing. Check data integrity.")
+        error_msg = "All samples were skipped during preprocessing. Skip reasons:\n"
+        for reason, count in skip_reasons.items():
+            error_msg += f"  - {reason}: {count} samples\n"
+        error_msg += "\nSuggestions:\n"
+        if "no_annotations" in skip_reasons:
+            error_msg += "  * Check if dataset contains 'objects' field with 'bbox' and category data\n"
+        if "invalid_bbox_format" in skip_reasons:
+            error_msg += "  * Verify bboxes are in COCO format [x, y, width, height] with valid positive values\n"
+        if "augmentation_error" in skip_reasons:
+            error_msg += "  * Check if bounding boxes are within image bounds before augmentation\n"
+        raise ValueError(error_msg)
+
+    # Log preprocessing summary
+    total_samples = len(image_ids)
+    logger.info(f"Preprocessing summary: {len(processed_images)}/{total_samples} samples successful")
+    if skip_reasons:
+        logger.info("Skipped samples breakdown:")
+        for reason, count in skip_reasons.items():
+            logger.info(f"  - {reason}: {count}")
 
     heights = [img.shape[0] for img in processed_images]
     widths = [img.shape[1] for img in processed_images]
