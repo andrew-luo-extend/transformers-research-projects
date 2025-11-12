@@ -63,55 +63,6 @@ logger = logging.getLogger(__name__)
 CANDIDATE_CATEGORY_KEYS: Tuple[str, ...] = ("category_id", "category", "label", "class", "id")
 
 
-class RobustTrainer(Trainer):
-    """Custom Trainer that catches errors during training step and skips problematic batches.
-
-    This allows training to continue even when some samples cause issues (e.g., empty
-    annotations causing Hungarian matcher errors).
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.skipped_batches = 0
-        self.total_batches = 0
-
-    def training_step(self, model, inputs, num_items_in_batch=None):
-        """Override training_step to catch and skip batches that cause errors."""
-        self.total_batches += 1
-        try:
-            if num_items_in_batch is not None:
-                return super().training_step(model, inputs, num_items_in_batch)
-            else:
-                return super().training_step(model, inputs)
-        except (ValueError, RuntimeError, AssertionError) as e:
-            error_msg = str(e)
-            # Check if it's a known recoverable error (Hungarian matcher, invalid values, etc.)
-            if any(keyword in error_msg.lower() for keyword in [
-                "matrix contains invalid",
-                "hungarian",
-                "cost matrix",
-                "nan",
-                "inf",
-                "invalid numeric",
-                "attempted unscale_",
-            ]):
-                self.skipped_batches += 1
-                logger.warning(
-                    f"Skipping batch {self.total_batches} due to error: {error_msg[:100]}... "
-                    f"(Total skipped: {self.skipped_batches}/{self.total_batches})"
-                )
-                # Return a zero tensor without gradient to avoid affecting the training
-                # We need to return the loss divided by gradient accumulation steps
-                # to match what the normal training step would return
-                loss = torch.tensor(0.0, device=model.device)
-                if self.args.gradient_accumulation_steps > 1:
-                    loss = loss / self.args.gradient_accumulation_steps
-                return loss.detach()
-            else:
-                # Re-raise if it's not a known recoverable error
-                raise
-
-
 @dataclass
 class ModelArguments:
     """Model configuration."""
@@ -759,15 +710,43 @@ def preprocess_examples(
 def collate_fn(features: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Custom collation for DETR-style object detection models.
 
-    Handles batches with empty samples by ensuring at least one non-empty sample
-    when possible. If all samples are empty, adds a dummy annotation to avoid
+    Filters out samples with empty annotations at collation time to avoid
     Hungarian matcher issues.
     """
+    # Filter out features with empty labels
+    valid_features = []
+    skipped_count = 0
+
+    for feature in features:
+        label = feature.get("labels")
+        has_annotations = False
+
+        if isinstance(label, dict):
+            boxes = label.get("boxes")
+            if isinstance(boxes, torch.Tensor) and boxes.numel() > 0:
+                has_annotations = True
+        elif isinstance(label, list) and len(label) > 0:
+            has_annotations = True
+
+        if has_annotations:
+            valid_features.append(feature)
+        else:
+            skipped_count += 1
+
+    # If we skipped any, log it
+    if skipped_count > 0:
+        logger.debug(f"Filtered out {skipped_count} samples with empty annotations from batch")
+
+    # If no valid features remain, this shouldn't happen often but just in case,
+    # we'll raise an exception which will cause the batch to be skipped
+    if not valid_features:
+        raise ValueError("Batch contains only samples with empty annotations - skipping")
+
     pixel_values: List[torch.Tensor] = []
     pixel_masks: List[torch.Tensor] = []
     labels: List[Any] = []
 
-    for feature in features:
+    for feature in valid_features:
         pv = feature["pixel_values"]
         if isinstance(pv, torch.Tensor) and pv.dim() == 4 and pv.shape[0] == 1:
             pv = pv.squeeze(0)
@@ -780,27 +759,6 @@ def collate_fn(features: List[Dict[str, Any]]) -> Dict[str, Any]:
             pixel_masks.append(pm)
 
         labels.append(feature["labels"])
-
-    # Check if all samples in batch are empty (no boxes)
-    all_empty = True
-    for label in labels:
-        if isinstance(label, dict):
-            boxes = label.get("boxes")
-            if isinstance(boxes, torch.Tensor) and boxes.numel() > 0:
-                all_empty = False
-                break
-        elif isinstance(label, list) and len(label) > 0:
-            all_empty = False
-            break
-
-    # If all empty, add a tiny dummy box to the first sample to avoid matcher crash
-    if all_empty and labels:
-        logger.debug("Batch contains only empty samples. Adding dummy annotation to first sample.")
-        first_label = labels[0]
-        if isinstance(first_label, dict):
-            # Add a tiny dummy box in the corner with label 0
-            first_label["boxes"] = torch.tensor([[0.0, 0.0, 0.01, 0.01]], dtype=torch.float32)
-            first_label["class_labels"] = torch.tensor([0], dtype=torch.int64)
 
     batch = {
         "pixel_values": torch.stack(pixel_values),
@@ -1025,7 +983,7 @@ def main() -> None:
     if training_args.do_eval and eval_dataset is not None:
         eval_dataset = eval_dataset.with_transform(transform_eval)
 
-    trainer = RobustTrainer(
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
