@@ -211,8 +211,6 @@ def main():
     
     # Load model (same as AutoTrain)
     logger.info(f"Loading model from {args.model_name_or_path}")
-    from transformers import AutoConfig
-    
     model_config = AutoConfig.from_pretrained(
         args.model_name_or_path,
         label2id=label2id,
