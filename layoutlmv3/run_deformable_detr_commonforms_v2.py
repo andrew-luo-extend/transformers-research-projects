@@ -676,10 +676,11 @@ def preprocess_examples(
                 boxes = boxes[:length]
                 class_labels = class_labels[:length]
 
-            # Keep samples with no boxes but mark them - they'll be filtered at collation time
+            # Keep samples with no boxes - ensure they have the right shape (0, 4) for boxes
             if boxes.numel() == 0:
-                label["boxes"] = boxes
-                label["class_labels"] = class_labels
+                # Empty tensor with correct shape for COCO format boxes
+                label["boxes"] = torch.empty((0, 4), dtype=torch.float32)
+                label["class_labels"] = torch.empty((0,), dtype=torch.int64)
                 cleaned_labels.append(label)
                 continue
 
@@ -708,43 +709,14 @@ def preprocess_examples(
 def collate_fn(features: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Custom collation for DETR-style object detection models.
 
-    Filters out samples with empty annotations at collation time to avoid
-    Hungarian matcher issues.
+    Keeps all samples including those with empty annotations. The model should
+    handle empty targets properly by skipping Hungarian matching for them.
     """
-    # Filter out features with empty labels
-    valid_features = []
-    skipped_count = 0
-
-    for feature in features:
-        label = feature.get("labels")
-        has_annotations = False
-
-        if isinstance(label, dict):
-            boxes = label.get("boxes")
-            if isinstance(boxes, torch.Tensor) and boxes.numel() > 0:
-                has_annotations = True
-        elif isinstance(label, list) and len(label) > 0:
-            has_annotations = True
-
-        if has_annotations:
-            valid_features.append(feature)
-        else:
-            skipped_count += 1
-
-    # If we skipped any, log it
-    if skipped_count > 0:
-        logger.debug(f"Filtered out {skipped_count} samples with empty annotations from batch")
-
-    # If no valid features remain, this shouldn't happen often but just in case,
-    # we'll raise an exception which will cause the batch to be skipped
-    if not valid_features:
-        raise ValueError("Batch contains only samples with empty annotations - skipping")
-
     pixel_values: List[torch.Tensor] = []
     pixel_masks: List[torch.Tensor] = []
     labels: List[Any] = []
 
-    for feature in valid_features:
+    for feature in features:
         pv = feature["pixel_values"]
         if isinstance(pv, torch.Tensor) and pv.dim() == 4 and pv.shape[0] == 1:
             pv = pv.squeeze(0)
