@@ -449,17 +449,24 @@ def preprocess_examples(
 
         # Debug logging for first sample
         if not debug_logged:
+            logger.info("=" * 60)
             logger.info("First sample debug info:")
             logger.info(f"  Image ID: {image_id}")
             logger.info(f"  Image shape: {image_np.shape}")
+            logger.info(f"  Objects type: {type(objects)}")
             logger.info(f"  Objects keys: {list(objects.keys()) if objects else 'None'}")
             logger.info(f"  Category key: {category_key}")
-            logger.info(f"  Raw bboxes count: {len(raw_bboxes)}")
-            logger.info(f"  Raw categories count: {len(raw_categories)}")
-            if raw_bboxes:
+            logger.info(f"  Raw bboxes type: {type(raw_bboxes)}")
+            logger.info(f"  Raw bboxes count: {len(raw_bboxes) if raw_bboxes else 0}")
+            logger.info(f"  Raw categories type: {type(raw_categories)}")
+            logger.info(f"  Raw categories count: {len(raw_categories) if raw_categories else 0}")
+            if raw_bboxes and len(raw_bboxes) > 0:
                 logger.info(f"  First bbox: {raw_bboxes[0]}")
-            if raw_categories:
+                logger.info(f"  First bbox type: {type(raw_bboxes[0])}")
+            if raw_categories and len(raw_categories) > 0:
                 logger.info(f"  First category: {raw_categories[0]}")
+            logger.info(f"  Full objects structure: {objects}")
+            logger.info("=" * 60)
             debug_logged = True
 
         # Skip samples with no annotations
