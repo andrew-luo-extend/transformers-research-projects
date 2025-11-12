@@ -191,11 +191,28 @@ def main():
         logger.info(f"Limiting eval to {args.max_eval_samples} samples")
         eval_dataset = eval_dataset.select(range(min(args.max_eval_samples, len(eval_dataset))))
     
-    # Get category names from dataset schema (same as AutoTrain)
+    # Get category names from dataset schema
     logger.info("Extracting categories...")
-    categories = train_dataset.features["objects"].feature["category"].names
+    try:
+        # Try AutoTrain way first
+        categories = train_dataset.features["objects"].feature["category"].names
+    except AttributeError:
+        # CommonForms has a different structure
+        try:
+            categories = train_dataset.features["objects"]["category"].names
+        except:
+            # Fallback: extract from data
+            logger.warning("Could not extract categories from schema, sampling data...")
+            sample_cats = set()
+            for i, example in enumerate(train_dataset):
+                if i >= 100:
+                    break
+                sample_cats.update(example["objects"]["category"])
+            categories = [f"class_{i}" for i in sorted(list(sample_cats))]
+    
     id2label = dict(enumerate(categories))
     label2id = {v: k for k, v in id2label.items()}
+    logger.info(f"Found {len(categories)} categories: {categories}")
     
     logger.info(f"Label mapping: {id2label}")
     
