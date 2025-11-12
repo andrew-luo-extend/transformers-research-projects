@@ -469,11 +469,36 @@ def preprocess_examples(
             logger.info("=" * 60)
             debug_logged = True
 
-        # Skip samples with no annotations
+        # Handle samples with no annotations (empty pages)
         if not raw_bboxes or not raw_categories:
-            logger.debug("Skipping sample %s: no bounding boxes or categories", image_id)
-            skip_reasons["no_annotations"] = skip_reasons.get("no_annotations", 0) + 1
-            continue
+            logger.debug(f"Processing empty sample {image_id} with no annotations")
+            # Process the image with empty bboxes - the model can learn from this
+            try:
+                albumentations_inputs = transform(
+                    image=image_np,
+                    bboxes=[],
+                    category_id=[],
+                )
+                img_transformed = albumentations_inputs["image"]
+
+                if isinstance(image_id, (int, np.integer)):
+                    target_image_id = int(image_id)
+                else:
+                    try:
+                        target_image_id = int(str(image_id))
+                    except (TypeError, ValueError):
+                        target_image_id = idx
+
+                processed_images.append(img_transformed.astype(np.uint8))
+                processed_targets.append({
+                    "image_id": target_image_id,
+                    "annotations": [],  # Empty annotations for empty page
+                })
+                continue
+            except Exception as exc:
+                logger.warning(f"Failed to process empty sample {image_id}: {exc}")
+                skip_reasons["empty_sample_error"] = skip_reasons.get("empty_sample_error", 0) + 1
+                continue
 
         # Validate bbox format
         img_h, img_w = image_np.shape[:2]
@@ -725,6 +750,26 @@ def log_split_size(name: str, dataset: Any, use_streaming: bool) -> None:
             logger.info("%s split size: unknown", name)
 
 
+def filter_empty_annotations(example: Dict[str, Any]) -> bool:
+    """Filter out samples that have no bounding boxes."""
+    objects = example.get("objects")
+    if objects is None:
+        return False
+
+    # Check if bbox field exists and has content
+    bboxes = objects.get("bbox") or objects.get("boxes") or []
+    if not bboxes or len(bboxes) == 0:
+        return False
+
+    # Check if category field exists and has content
+    for key in CANDIDATE_CATEGORY_KEYS:
+        categories = objects.get(key)
+        if categories and len(categories) > 0:
+            return True
+
+    return False
+
+
 def main() -> None:
     parser = HfArgumentParser((ModelArguments, DataArguments, RunPodArguments, TrainingArguments))
 
@@ -781,6 +826,15 @@ def main() -> None:
     if training_args.do_eval and eval_dataset is None:
         logger.warning("Evaluation requested but no eval split found. Skipping evaluation.")
         training_args.do_eval = False
+
+    # Note: We don't filter out empty annotations to allow the model to learn from empty pages
+    # If you want to filter them out, uncomment the code below:
+    # if train_dataset is not None and not data_args.use_streaming:
+    #     logger.info("Filtering training dataset to remove samples without annotations...")
+    #     original_size = len(train_dataset)
+    #     train_dataset = train_dataset.filter(filter_empty_annotations)
+    #     filtered_size = len(train_dataset)
+    #     logger.info(f"Filtered {original_size - filtered_size} empty samples from training set ({filtered_size} remaining)")
 
     if training_args.do_train and data_args.max_train_samples:
         train_dataset = limit_dataset(train_dataset, data_args.max_train_samples, data_args.use_streaming)
