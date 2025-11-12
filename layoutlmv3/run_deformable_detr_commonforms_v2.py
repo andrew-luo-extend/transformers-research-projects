@@ -676,13 +676,8 @@ def preprocess_examples(
                 boxes = boxes[:length]
                 class_labels = class_labels[:length]
 
+            # Skip samples with no boxes - they'll be filtered at collation time
             if boxes.numel() == 0:
-                boxes = torch.tensor([[0.0, 0.0, 0.01, 0.01]], dtype=torch.float32)
-                class_labels = torch.zeros((1,), dtype=torch.int64)
-                # Skip further processing for dummy boxes
-                label["boxes"] = boxes
-                label["class_labels"] = class_labels
-                cleaned_labels.append(label)
                 continue
 
             finite_mask = torch.isfinite(boxes).all(dim=1)
@@ -887,7 +882,7 @@ def main() -> None:
         training_args.do_eval = False
 
     # Optionally filter out empty annotations
-    # When disabled, RobustTrainer will catch and skip batches that cause errors
+    # When disabled, the collator will filter them out at batch time
     if data_args.filter_empty_annotations:
         if train_dataset is not None and not data_args.use_streaming:
             logger.info("Filtering training dataset to remove samples without annotations...")
