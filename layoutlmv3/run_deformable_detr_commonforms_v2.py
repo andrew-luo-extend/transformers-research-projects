@@ -9,6 +9,7 @@ Dataset: https://huggingface.co/datasets/jbarrow/CommonForms
 """
 
 import argparse
+import logging
 import numpy as np
 import torch
 from PIL import Image
@@ -21,6 +22,8 @@ from transformers import (
     Trainer,
     TrainingArguments,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def get_args():
