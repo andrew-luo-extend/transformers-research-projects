@@ -469,36 +469,12 @@ def preprocess_examples(
             logger.info("=" * 60)
             debug_logged = True
 
-        # Handle samples with no annotations (empty pages)
+        # Skip samples with no annotations
+        # Note: Empty samples should have been filtered out at dataset loading time
         if not raw_bboxes or not raw_categories:
-            logger.debug(f"Processing empty sample {image_id} with no annotations")
-            # Process the image with empty bboxes - the model can learn from this
-            try:
-                albumentations_inputs = transform(
-                    image=image_np,
-                    bboxes=[],
-                    category_id=[],
-                )
-                img_transformed = albumentations_inputs["image"]
-
-                if isinstance(image_id, (int, np.integer)):
-                    target_image_id = int(image_id)
-                else:
-                    try:
-                        target_image_id = int(str(image_id))
-                    except (TypeError, ValueError):
-                        target_image_id = idx
-
-                processed_images.append(img_transformed.astype(np.uint8))
-                processed_targets.append({
-                    "image_id": target_image_id,
-                    "annotations": [],  # Empty annotations for empty page
-                })
-                continue
-            except Exception as exc:
-                logger.warning(f"Failed to process empty sample {image_id}: {exc}")
-                skip_reasons["empty_sample_error"] = skip_reasons.get("empty_sample_error", 0) + 1
-                continue
+            logger.warning(f"Skipping sample {image_id}: no bounding boxes or categories (should have been filtered)")
+            skip_reasons["no_annotations"] = skip_reasons.get("no_annotations", 0) + 1
+            continue
 
         # Validate bbox format
         img_h, img_w = image_np.shape[:2]
@@ -827,14 +803,26 @@ def main() -> None:
         logger.warning("Evaluation requested but no eval split found. Skipping evaluation.")
         training_args.do_eval = False
 
-    # Note: We don't filter out empty annotations to allow the model to learn from empty pages
-    # If you want to filter them out, uncomment the code below:
-    # if train_dataset is not None and not data_args.use_streaming:
-    #     logger.info("Filtering training dataset to remove samples without annotations...")
-    #     original_size = len(train_dataset)
-    #     train_dataset = train_dataset.filter(filter_empty_annotations)
-    #     filtered_size = len(train_dataset)
-    #     logger.info(f"Filtered {original_size - filtered_size} empty samples from training set ({filtered_size} remaining)")
+    # Filter out empty annotations
+    # Note: DETR models have issues with batches containing only empty targets due to the
+    # Hungarian matcher requiring valid cost matrices. If you need to train on empty pages,
+    # you'll need to ensure batches always contain a mix of empty and non-empty samples.
+    if train_dataset is not None and not data_args.use_streaming:
+        logger.info("Filtering training dataset to remove samples without annotations...")
+        original_size = len(train_dataset)
+        train_dataset = train_dataset.filter(filter_empty_annotations)
+        filtered_size = len(train_dataset)
+        logger.info(f"Filtered {original_size - filtered_size} empty samples from training set ({filtered_size} remaining)")
+
+        if filtered_size == 0:
+            raise ValueError("After filtering empty samples, no training samples remain. Your dataset may only contain empty annotations.")
+
+    if eval_dataset is not None and not data_args.use_streaming:
+        logger.info("Filtering evaluation dataset to remove samples without annotations...")
+        original_size = len(eval_dataset)
+        eval_dataset = eval_dataset.filter(filter_empty_annotations)
+        filtered_size = len(eval_dataset)
+        logger.info(f"Filtered {original_size - filtered_size} empty samples from evaluation set ({filtered_size} remaining)")
 
     if training_args.do_train and data_args.max_train_samples:
         train_dataset = limit_dataset(train_dataset, data_args.max_train_samples, data_args.use_streaming)
