@@ -17,6 +17,7 @@ import albumentations as A
 
 from datasets import load_dataset
 from transformers import (
+    AutoConfig,
     AutoImageProcessor,
     AutoModelForObjectDetection,
     Trainer,
@@ -190,45 +191,51 @@ def main():
         logger.info(f"Limiting eval to {args.max_eval_samples} samples")
         eval_dataset = eval_dataset.select(range(min(args.max_eval_samples, len(eval_dataset))))
     
-    # Get category names from dataset schema
+    # Get category names from dataset schema (same as AutoTrain)
     logger.info("Extracting categories...")
-    try:
-        categories = train_dataset.features["objects"].feature["category"].names
-        id2label = dict(enumerate(categories))
-        label2id = {v: k for k, v in id2label.items()}
-        logger.info(f"Found {len(categories)} categories: {categories}")
-    except:
-        # Fallback: assume categories are 0-indexed
-        logger.warning("Could not extract category names from schema")
-        # Sample a few examples to find unique categories
-        sample_categories = set()
-        for i, example in enumerate(train_dataset):
-            if i >= 100:
-                break
-            sample_categories.update(example["objects"]["category"])
-        categories = sorted(list(sample_categories))
-        id2label = {i: f"class_{i}" for i in categories}
-        label2id = {v: k for k, v in id2label.items()}
-        logger.info(f"Found {len(categories)} unique category IDs: {categories}")
+    categories = train_dataset.features["objects"].feature["category"].names
+    id2label = dict(enumerate(categories))
+    label2id = {v: k for k, v in id2label.items()}
     
     logger.info(f"Label mapping: {id2label}")
     
-    # Load image processor
+    # Load image processor (same as AutoTrain)
     logger.info(f"Loading image processor from {args.model_name_or_path}")
     image_processor = AutoImageProcessor.from_pretrained(
         args.model_name_or_path,
         cache_dir=args.cache_dir,
+        do_pad=False,  # Padding done in Albumentations
+        do_resize=False,  # Resize done in Albumentations
+        size={"longest_edge": args.image_size},
     )
     
-    # Load model
+    # Load model (same as AutoTrain)
     logger.info(f"Loading model from {args.model_name_or_path}")
-    model = AutoModelForObjectDetection.from_pretrained(
+    from transformers import AutoConfig
+    
+    model_config = AutoConfig.from_pretrained(
         args.model_name_or_path,
-        cache_dir=args.cache_dir,
-        id2label=id2label,
         label2id=label2id,
-        ignore_mismatched_sizes=True,
+        id2label=id2label,
+        cache_dir=args.cache_dir,
     )
+    
+    try:
+        model = AutoModelForObjectDetection.from_pretrained(
+            args.model_name_or_path,
+            config=model_config,
+            cache_dir=args.cache_dir,
+            ignore_mismatched_sizes=True,
+        )
+    except OSError:
+        # Fallback for TensorFlow models
+        model = AutoModelForObjectDetection.from_pretrained(
+            args.model_name_or_path,
+            config=model_config,
+            cache_dir=args.cache_dir,
+            ignore_mismatched_sizes=True,
+            from_tf=True,
+        )
     
     logger.info(f"Model loaded with {len(id2label)} classes")
     
@@ -251,32 +258,48 @@ def main():
     
     logger.info("Transforms applied!")
     
-    # Training arguments
-    training_args = TrainingArguments(
-        output_dir=args.output_dir,
-        num_train_epochs=args.num_train_epochs,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        per_device_eval_batch_size=args.per_device_eval_batch_size,
-        learning_rate=args.learning_rate,
-        lr_scheduler_type=args.lr_scheduler_type,
-        weight_decay=args.weight_decay,
-        warmup_ratio=args.warmup_ratio,
-        max_grad_norm=args.max_grad_norm,
-        fp16=args.fp16,
-        dataloader_num_workers=args.dataloader_num_workers,
-        logging_steps=args.logging_steps,
-        save_steps=args.save_steps,
-        eval_steps=args.eval_steps if args.do_eval else None,
-        eval_strategy="steps" if args.do_eval else "no",
-        save_strategy="steps",
-        save_total_limit=args.save_total_limit,
-        remove_unused_columns=False,
-        push_to_hub=args.push_to_hub,
-        hub_model_id=args.hub_model_id,
-        seed=args.seed,
-        dataloader_pin_memory=True,
-        report_to="tensorboard",
-    )
+    # Training arguments (consistent with AutoTrain)
+    training_args_dict = {
+        "output_dir": args.output_dir,
+        "num_train_epochs": args.num_train_epochs,
+        "per_device_train_batch_size": args.per_device_train_batch_size,
+        "per_device_eval_batch_size": args.per_device_eval_batch_size,
+        "learning_rate": args.learning_rate,
+        "lr_scheduler_type": args.lr_scheduler_type,
+        "weight_decay": args.weight_decay,
+        "warmup_ratio": args.warmup_ratio,
+        "max_grad_norm": args.max_grad_norm,
+        "dataloader_num_workers": args.dataloader_num_workers,
+        "logging_steps": args.logging_steps,
+        "save_steps": args.save_steps,
+        "save_strategy": "steps",
+        "save_total_limit": args.save_total_limit,
+        "remove_unused_columns": False,
+        "push_to_hub": args.push_to_hub,
+        "seed": args.seed,
+        "dataloader_pin_memory": True,
+        "report_to": "tensorboard",
+        "ddp_find_unused_parameters": False,
+    }
+    
+    # Add eval-specific args
+    if args.do_eval:
+        training_args_dict["eval_steps"] = args.eval_steps
+        training_args_dict["eval_strategy"] = "steps"
+        training_args_dict["load_best_model_at_end"] = True
+        training_args_dict["eval_do_concat_batches"] = False  # Same as AutoTrain
+    else:
+        training_args_dict["eval_strategy"] = "no"
+    
+    # Add FP16
+    if args.fp16:
+        training_args_dict["fp16"] = True
+    
+    # Add hub model ID if pushing
+    if args.push_to_hub and args.hub_model_id:
+        training_args_dict["hub_model_id"] = args.hub_model_id
+    
+    training_args = TrainingArguments(**training_args_dict)
     
     # Initialize trainer
     logger.info("Initializing Trainer...")
