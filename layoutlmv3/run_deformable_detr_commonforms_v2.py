@@ -213,6 +213,14 @@ def transform_aug_ann(examples, transform, image_processor, category_key, catego
     encoded = image_processor(images=processed_images, annotations=processed_targets, return_tensors="pt")
     encoded = {key: _to_plain_value(value) for key, value in encoded.items()}
     
+    # Sanitize pixel tensors to avoid propagating NaNs further down the pipeline
+    pixel_values = encoded.get("pixel_values")
+    if isinstance(pixel_values, torch.Tensor):
+        encoded["pixel_values"] = torch.nan_to_num(pixel_values.to(torch.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    pixel_mask = encoded.get("pixel_mask")
+    if isinstance(pixel_mask, torch.Tensor):
+        encoded["pixel_mask"] = torch.nan_to_num(pixel_mask.to(torch.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    
     # Clean labels to ensure no NaNs or empty tensors propagate to the Trainer
     if "labels" in encoded:
         cleaned_labels = []
@@ -245,7 +253,8 @@ def transform_aug_ann(examples, transform, image_processor, category_key, catego
                 elif not isinstance(class_labels, torch.Tensor):
                     class_labels = torch.tensor(class_labels, dtype=torch.int64, device=device)
                 else:
-                    class_labels = class_labels.to(torch.int64)
+                    class_labels = class_labels.to(dtype=torch.int64, device=device)
+                class_labels = class_labels.reshape(-1)
                 
                 if class_labels.shape[0] != boxes.shape[0]:
                     min_len = min(class_labels.shape[0], boxes.shape[0])
@@ -544,6 +553,28 @@ def main():
         data_collator=collate_fn,
         tokenizer=image_processor,  # For saving
     )
+
+    # Inspect the first batch before training to ensure tensors are finite
+    if args.do_train:
+        try:
+            debug_loader = trainer.get_train_dataloader()
+            first_batch = next(iter(debug_loader))
+            if isinstance(first_batch, dict):
+                pv = first_batch.get("pixel_values")
+                if isinstance(pv, torch.Tensor) and torch.isnan(pv).any():
+                    raise ValueError("Detected NaNs in training pixel_values before training starts.")
+                labels = first_batch.get("labels", [])
+                for idx, label in enumerate(labels):
+                    if isinstance(label, dict):
+                        boxes = label.get("boxes")
+                        if isinstance(boxes, torch.Tensor) and torch.isnan(boxes).any():
+                            raise ValueError(f"Detected NaNs in training boxes for sample {idx} before training starts.")
+            del first_batch
+        except StopIteration:
+            logger.warning("Training dataloader is empty during sanity inspection.")
+        except Exception as loader_err:
+            logger.error(f"Sanity inspection of training dataloader failed: {loader_err}")
+            raise
     
     # Train
     if args.do_train:
