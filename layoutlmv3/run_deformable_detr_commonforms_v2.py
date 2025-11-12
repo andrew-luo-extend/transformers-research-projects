@@ -676,8 +676,11 @@ def preprocess_examples(
                 boxes = boxes[:length]
                 class_labels = class_labels[:length]
 
-            # Skip samples with no boxes - they'll be filtered at collation time
+            # Keep samples with no boxes but mark them - they'll be filtered at collation time
             if boxes.numel() == 0:
+                label["boxes"] = boxes
+                label["class_labels"] = class_labels
+                cleaned_labels.append(label)
                 continue
 
             finite_mask = torch.isfinite(boxes).all(dim=1)
