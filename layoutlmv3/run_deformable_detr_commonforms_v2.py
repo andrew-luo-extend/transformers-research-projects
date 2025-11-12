@@ -475,6 +475,24 @@ def preprocess_examples(
     if not processed_images:
         raise ValueError("All samples were skipped during preprocessing. Check data integrity.")
 
+    heights = [img.shape[0] for img in processed_images]
+    widths = [img.shape[1] for img in processed_images]
+    max_h = max(heights)
+    max_w = max(widths)
+    if any(h != max_h or w != max_w for h, w in zip(heights, widths)):
+        uniform_images: List[np.ndarray] = []
+        for img in processed_images:
+            pad_h = max_h - img.shape[0]
+            pad_w = max_w - img.shape[1]
+            if pad_h < 0 or pad_w < 0:
+                raise ValueError("Encountered negative padding values while normalizing image shapes.")
+            if pad_h == 0 and pad_w == 0:
+                uniform_images.append(img)
+                continue
+            padded = np.pad(img, ((0, pad_h), (0, pad_w), (0, 0)), mode="constant", constant_values=0)
+            uniform_images.append(padded)
+        processed_images = uniform_images
+
     encoded = image_processor(images=processed_images, annotations=processed_targets, return_tensors="pt")
     encoded = {key: _to_plain_value(value) for key, value in encoded.items()}
 
