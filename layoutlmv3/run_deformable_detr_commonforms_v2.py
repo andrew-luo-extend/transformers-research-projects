@@ -451,10 +451,12 @@ def preprocess_examples(
             transformed_bboxes.append([x, y, w, h])
             transformed_categories.append(int(category_id))
 
-        if not transformed_bboxes:
-            transformed_bboxes = [[0.0, 0.0, 1.0, 1.0]]
-            fallback_label = transformed_categories[0] if transformed_categories else (mapped_categories[0] if mapped_categories else 0)
-            transformed_categories = [fallback_label]
+        if not transformed_bboxes or not transformed_categories:
+            logger.debug("Skipping sample %s after augmentation: no valid boxes.", image_id)
+            continue
+        if not all(np.isfinite(bbox).all() for bbox in transformed_bboxes):
+            logger.debug("Skipping sample %s after augmentation: non-finite bbox detected.", image_id)
+            continue
 
         if isinstance(image_id, (int, np.integer)):
             target_image_id = int(image_id)
@@ -536,9 +538,18 @@ def preprocess_examples(
                 boxes = torch.tensor([[0.0, 0.0, 0.01, 0.01]], dtype=torch.float32)
                 class_labels = torch.zeros((1,), dtype=torch.int64)
 
+            finite_mask = torch.isfinite(boxes).all(dim=1)
+            if finite_mask.any():
+                boxes = boxes[finite_mask]
+                class_labels = class_labels[finite_mask]
+            else:
+                logger.debug("Replacing non-finite boxes with default placeholder.")
+                boxes = torch.tensor([[0.5, 0.5, 1e-3, 1e-3]], dtype=torch.float32)
+                class_labels = torch.zeros((1,), dtype=torch.int64)
+
             boxes = boxes.clamp(0.0, 1.0)
             if boxes.shape[-1] >= 4:
-                boxes[:, 2:] = boxes[:, 2:].clamp_min(1e-4)
+                boxes[:, 2:] = boxes[:, 2:].clamp(1e-4, 1.0 - 1e-4)
 
             label["boxes"] = boxes
             label["class_labels"] = class_labels
