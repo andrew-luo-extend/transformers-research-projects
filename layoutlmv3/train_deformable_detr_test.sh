@@ -11,6 +11,7 @@ PYTHON_BIN="${PYTHON:-python3}"
 MODEL_ID="${HF_MODEL_ID:-${HF_USERNAME}/deformable-detr-commonforms-test}"
 OUTPUT_DIR="${OUTPUT_DIR:-/workspace/outputs/deformable-detr-test}"
 CACHE_DIR="${CACHE_DIR:-/workspace/hf-cache}"
+DATASETS_CACHE="$CACHE_DIR/datasets"
 
 if [[ -n "${HF_TOKEN:-}" ]]; then
   HUB_TOKEN_ARGS=(--hub_token "${HF_TOKEN}")
