@@ -10,7 +10,7 @@ PYTHON_BIN="${PYTHON:-python3}"
 
 MODEL_ID="${HF_MODEL_ID:-${HF_USERNAME}/deformable-detr-commonforms}"
 OUTPUT_DIR="${OUTPUT_DIR:-/workspace/outputs/deformable-detr-commonforms}"
-CACHE_DIR="${CACHE_DIR:-/workspace/hf-cache}"
+CACHE_DIR="${CACHE_DIR:-/workspace/cache}"
 DATASETS_CACHE="$CACHE_DIR/datasets"
 
 mkdir -p "${OUTPUT_DIR}"
