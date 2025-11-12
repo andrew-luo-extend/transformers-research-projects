@@ -267,7 +267,7 @@ def main():
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
         eval_steps=args.eval_steps if args.do_eval else None,
-        evaluation_strategy="steps" if args.do_eval else "no",
+        eval_strategy="steps" if args.do_eval else "no",
         save_strategy="steps",
         save_total_limit=args.save_total_limit,
         remove_unused_columns=False,
