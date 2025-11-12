@@ -9,6 +9,8 @@ This uses the Aryn/deformable-detr-DocLayNet model which is:
 - Better multi-scale detection
 
 Model: https://huggingface.co/Aryn/deformable-detr-DocLayNet
+
+Based on HuggingFace DETR fine-tuning guide with Albumentations augmentation.
 """
 
 import logging
@@ -18,6 +20,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 import torch
 from PIL import Image
+import numpy as np
+import albumentations as A
 
 import datasets
 from datasets import load_dataset
@@ -142,6 +146,7 @@ def convert_commonforms_to_coco_format(examples):
             # Final validation
             if w > 0 and h > 0:
                 coco_bboxes.append([x, y, w, h])
+                # Keep original category ID (will be remapped in preprocessing)
                 valid_categories.append(int(objects["category_id"][idx]))
                 valid_areas.append(w * h)
         
@@ -245,6 +250,9 @@ def main():
     # Extract category information from dataset
     logger.info("Extracting category information...")
     
+    # Create category ID remapping (CommonForms IDs → model IDs [0, N-1])
+    category_id_remap = {}
+    
     # Try to get category names from dataset features (like AutoTrain)
     try:
         # CommonForms has category names in the dataset schema
@@ -252,6 +260,11 @@ def main():
         id2label = dict(enumerate(categories))
         label2id = {v: k for k, v in id2label.items()}
         num_labels = len(categories)
+        
+        # Create remapping: original category ID → model category ID
+        # Assuming original IDs match the index in the names list
+        category_id_remap = {i: i for i in range(num_labels)}
+        
         logger.info(f"Found {num_labels} categories from dataset schema: {categories}")
     except (AttributeError, KeyError):
         # Fallback: scan data for unique category IDs
@@ -272,10 +285,15 @@ def main():
         category_list = sorted(list(categories))
         num_labels = len(category_list)
         
-        # Create label mappings
+        # Create label mappings and remapping
         id2label = {i: f"category_{cat}" for i, cat in enumerate(category_list)}
         label2id = {v: k for k, v in id2label.items()}
+        
+        # Remap original category IDs to 0-indexed
+        category_id_remap = {orig_id: new_id for new_id, orig_id in enumerate(category_list)}
+        
         logger.info(f"Found {num_labels} unique category IDs: {category_list}")
+        logger.info(f"Category ID remapping: {category_id_remap}")
     
     logger.info(f"Label mapping: {id2label}")
     
@@ -318,11 +336,34 @@ def main():
             # Convert to list of individual annotation dicts
             individual_annotations = []
             for j in range(len(ann['category_id'])):
+                orig_cat_id = ann['category_id'][j]
+                
+                # Remap category ID to model's expected range
+                if orig_cat_id not in category_id_remap:
+                    logger.warning(f"Unknown category_id {orig_cat_id}. Skipping.")
+                    continue
+                
+                cat_id = category_id_remap[orig_cat_id]
+                
+                # Final validation
+                if cat_id < 0 or cat_id >= num_labels:
+                    logger.warning(f"Remapped category_id {cat_id} out of range [0, {num_labels-1}]. Skipping.")
+                    continue
+                
                 individual_annotations.append({
-                    'category_id': ann['category_id'][j],
+                    'category_id': cat_id,
                     'bbox': ann['bbox'][j],
                     'area': ann['area'][j],
                     'iscrowd': ann['iscrowd'][j],
+                })
+            
+            # Skip images with no valid annotations
+            if len(individual_annotations) == 0:
+                individual_annotations.append({
+                    'category_id': 0,
+                    'bbox': [0.0, 0.0, 1.0, 1.0],
+                    'area': 1.0,
+                    'iscrowd': 0,
                 })
             
             formatted_annotations.append({
@@ -331,7 +372,25 @@ def main():
             })
         
         # Process images with formatted annotations
-        encoding = image_processor(images=images, annotations=formatted_annotations, return_tensors="pt")
+        try:
+            encoding = image_processor(images=images, annotations=formatted_annotations, return_tensors="pt")
+            
+            # Debug: Log first batch to verify format
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"Batch size: {len(images)}")
+                logger.debug(f"Sample annotation: {formatted_annotations[0]}")
+                if 'labels' in encoding and len(encoding['labels']) > 0:
+                    sample_label = encoding['labels'][0]
+                    logger.debug(f"Processed labels keys: {sample_label.keys()}")
+                    if 'boxes' in sample_label:
+                        logger.debug(f"Sample boxes shape: {sample_label['boxes'].shape}")
+                        logger.debug(f"Sample boxes (first 3): {sample_label['boxes'][:3]}")
+                        logger.debug(f"Boxes min/max: {sample_label['boxes'].min()}, {sample_label['boxes'].max()}")
+                        
+        except Exception as e:
+            logger.error(f"Error in image processor: {e}")
+            logger.error(f"Sample annotation: {formatted_annotations[0] if formatted_annotations else 'None'}")
+            raise
         
         return encoding
     
