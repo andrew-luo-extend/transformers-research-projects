@@ -175,11 +175,20 @@ def transform_aug_ann(examples, transform, image_processor, category_key, catego
         
         transformed_bboxes = []
         transformed_categories = []
+        img_h, img_w = transform_out["image"].shape[:2]
         for bbox, category_id in zip(transform_out["bboxes"], transform_out["category_id"]):
-            x, y, w, h = bbox
+            x, y, w, h = map(float, bbox)
+            if not np.isfinite([x, y, w, h]).all():
+                continue
             if w <= 0 or h <= 0:
                 continue
-            transformed_bboxes.append([float(x), float(y), float(w), float(h)])
+            x = float(np.clip(x, 0.0, max(img_w - 1.0, 1.0)))
+            y = float(np.clip(y, 0.0, max(img_h - 1.0, 1.0)))
+            w = float(np.clip(w, 1.0, max(img_w - x, 1.0)))
+            h = float(np.clip(h, 1.0, max(img_h - y, 1.0)))
+            if w <= 0 or h <= 0:
+                continue
+            transformed_bboxes.append([x, y, w, h])
             transformed_categories.append(int(category_id))
         
         if len(transformed_bboxes) == 0:
@@ -203,6 +212,46 @@ def transform_aug_ann(examples, transform, image_processor, category_key, catego
     
     encoded = image_processor(images=processed_images, annotations=processed_targets, return_tensors="pt")
     encoded = {key: _to_plain_value(value) for key, value in encoded.items()}
+    
+    # Clean labels to ensure no NaNs or empty tensors propagate to the Trainer
+    if "labels" in encoded:
+        cleaned_labels = []
+        for label in encoded["labels"]:
+            if not isinstance(label, dict):
+                cleaned_labels.append(label)
+                continue
+            
+            label_copy = dict(label)
+            boxes = label_copy.get("boxes")
+            class_labels = label_copy.get("class_labels")
+            
+            if isinstance(boxes, torch.Tensor):
+                device = boxes.device
+                finite_mask = torch.isfinite(boxes).all(dim=1)
+                
+                if finite_mask.any():
+                    boxes = boxes[finite_mask]
+                    if isinstance(class_labels, torch.Tensor):
+                        class_labels = class_labels[finite_mask]
+                else:
+                    boxes = torch.empty(0, 4, dtype=boxes.dtype, device=device)
+                    if isinstance(class_labels, torch.Tensor):
+                        class_labels = class_labels.new_empty(0)
+                
+                # Ensure at least one valid annotation remains
+                if boxes.numel() == 0:
+                    boxes = torch.tensor([[0.0, 0.0, 0.01, 0.01]], dtype=torch.float32, device=device)
+                    if isinstance(class_labels, torch.Tensor):
+                        class_labels = torch.zeros(1, dtype=torch.int64, device=class_labels.device)
+                    else:
+                        class_labels = torch.tensor([0], dtype=torch.int64, device=device)
+                
+                label_copy["boxes"] = boxes
+                label_copy["class_labels"] = class_labels
+            
+            cleaned_labels.append(label_copy)
+        
+        encoded["labels"] = cleaned_labels
     
     return encoded
 
