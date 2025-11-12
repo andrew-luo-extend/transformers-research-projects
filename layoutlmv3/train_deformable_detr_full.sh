@@ -38,7 +38,7 @@ exec "${PYTHON_BIN}" "${DIR}/run_deformable_detr_commonforms_v2.py" \
   --max_grad_norm "${MAX_GRAD_NORM:-1.0}" \
   --logging_steps "${LOGGING_STEPS:-50}" \
   --save_strategy "${SAVE_STRATEGY:-epoch}" \
-  --evaluation_strategy "${EVALUATION_STRATEGY:-epoch}" \
+  --eval_strategy "${EVAL_STRATEGY:-epoch}" \
   --save_total_limit "${SAVE_TOTAL_LIMIT:-3}" \
   --load_best_model_at_end \
   --metric_for_best_model "${METRIC_FOR_BEST_MODEL:-eval_loss}" \

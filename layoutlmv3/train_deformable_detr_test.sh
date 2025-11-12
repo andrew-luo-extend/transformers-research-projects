@@ -39,7 +39,7 @@ exec "${PYTHON_BIN}" "${DIR}/run_deformable_detr_commonforms_v2.py" \
   --max_grad_norm "${MAX_GRAD_NORM:-1.0}" \
   --logging_steps "${LOGGING_STEPS:-5}" \
   --save_strategy "no" \
-  --evaluation_strategy "no" \
+  --eval_strategy "no" \
   --seed "${SEED:-42}" \
   --fp16 \
   --do_train \
