@@ -1,74 +1,322 @@
 #!/usr/bin/env python
 # coding=utf-8
 """
-Fine-tuning Deformable DETR for object detection on CommonForms.
-Based on the HuggingFace Fashionpedia fine-tuning example.
+RunPod-friendly finetuning script for Deformable DETR on the CommonForms dataset.
 
-Model: https://huggingface.co/Aryn/deformable-detr-DocLayNet
-Dataset: https://huggingface.co/datasets/jbarrow/CommonForms
+Highlights
+----------
+- Works out-of-the-box on RunPod GPU instances (auto-configures cache/output paths).
+- Uses Albumentations for strong data augmentation tuned for document layouts.
+- Handles CommonForms' COCO-style bounding boxes without intermediate conversion.
+- Supports local and streaming dataset loading, subset selection, and Hugging Face Hub push.
+- Compatible with `accelerate launch` for multi-GPU distributed training.
+
+Quick start (single GPU, RunPod defaults):
+
+```
+python run_deformable_detr_commonforms_v2.py \
+  --do_train --do_eval \
+  --per_device_train_batch_size 8 \
+  --per_device_eval_batch_size 8 \
+  --num_train_epochs 30 \
+  --learning_rate 5e-5 \
+  --fp16 \
+  --use_runpod_defaults
+```
+
+For multi-GPU:
+
+```
+accelerate launch --mixed_precision=fp16 run_deformable_detr_commonforms_v2.py \
+  --do_train --do_eval --use_runpod_defaults --per_device_train_batch_size 6
+```
 """
 
-import argparse
+from __future__ import annotations
+
+import itertools
 import logging
+import os
+import sys
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+import albumentations as A
 import numpy as np
 import torch
 from PIL import Image
-import albumentations as A
-from typing import Any
+from datasets import Dataset, IterableDataset, load_dataset
 
-from datasets import load_dataset
 from transformers import (
     AutoConfig,
     AutoImageProcessor,
     AutoModelForObjectDetection,
+    HfArgumentParser,
     Trainer,
     TrainingArguments,
+    set_seed,
 )
+
 
 logger = logging.getLogger(__name__)
 
-
-def get_args():
-    parser = argparse.ArgumentParser()
-    
-    # Model arguments
-    parser.add_argument("--model_name_or_path", type=str, default="Aryn/deformable-detr-DocLayNet")
-    parser.add_argument("--cache_dir", type=str, default=None)
-    
-    # Dataset arguments
-    parser.add_argument("--dataset_name", type=str, default="jbarrow/CommonForms")
-    parser.add_argument("--max_train_samples", type=int, default=None)
-    parser.add_argument("--max_eval_samples", type=int, default=None)
-    parser.add_argument("--image_size", type=int, default=1000)
-    
-    # Training arguments
-    parser.add_argument("--output_dir", type=str, default="./deformable-detr-commonforms")
-    parser.add_argument("--num_train_epochs", type=int, default=30)
-    parser.add_argument("--per_device_train_batch_size", type=int, default=16)
-    parser.add_argument("--per_device_eval_batch_size", type=int, default=16)
-    parser.add_argument("--learning_rate", type=float, default=5e-5)
-    parser.add_argument("--lr_scheduler_type", type=str, default="linear")
-    parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--warmup_ratio", type=float, default=0.01)
-    parser.add_argument("--max_grad_norm", type=float, default=1.0)
-    parser.add_argument("--fp16", action="store_true")
-    parser.add_argument("--dataloader_num_workers", type=int, default=4)
-    parser.add_argument("--logging_steps", type=int, default=100)
-    parser.add_argument("--save_steps", type=int, default=1000)
-    parser.add_argument("--eval_steps", type=int, default=1000)
-    parser.add_argument("--save_total_limit", type=int, default=3)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--push_to_hub", action="store_true")
-    parser.add_argument("--hub_model_id", type=str, default=None)
-    parser.add_argument("--do_train", action="store_true")
-    parser.add_argument("--do_eval", action="store_true")
-    
-    return parser.parse_args()
+CANDIDATE_CATEGORY_KEYS: Tuple[str, ...] = ("category_id", "category", "label", "class", "id")
 
 
-def formatted_anns(image_id, category_ids, bboxes):
-    """Format annotations for DETR"""
-    annotations = []
+@dataclass
+class ModelArguments:
+    """Model configuration."""
+
+    model_name_or_path: str = field(
+        default="Aryn/deformable-detr-DocLayNet",
+        metadata={"help": "Path or Hub ID of the pretrained Deformable DETR model."},
+    )
+    config_name: Optional[str] = field(
+        default=None,
+        metadata={"help": "Optional config path if different from model_name_or_path."},
+    )
+    processor_name: Optional[str] = field(
+        default=None,
+        metadata={"help": "Optional processor path if different from model_name_or_path."},
+    )
+    cache_dir: Optional[str] = field(
+        default=None,
+        metadata={"help": "Directory for caching pretrained weights and processors."},
+    )
+    revision: str = field(
+        default="main",
+        metadata={"help": "Commit/branch/tag of the model repository to use."},
+    )
+
+
+@dataclass
+class DataArguments:
+    """Dataset configuration."""
+
+    dataset_name: str = field(
+        default="jbarrow/CommonForms",
+        metadata={"help": "Dataset name on the Hugging Face Hub."},
+    )
+    dataset_config_name: Optional[str] = field(
+        default=None,
+        metadata={"help": "Optional dataset config (None for default)."},
+    )
+    train_split: str = field(
+        default="train",
+        metadata={"help": "Name of the training split."},
+    )
+    eval_split: str = field(
+        default="val",
+        metadata={"help": "Name of the evaluation split. Fallbacks: validation/test."},
+    )
+    use_streaming: bool = field(
+        default=False,
+        metadata={"help": "Stream data instead of downloading it. Useful for large datasets."},
+    )
+    max_train_samples: Optional[int] = field(
+        default=None,
+        metadata={"help": "Optional cap on the number of training samples (for debugging)."},
+    )
+    max_eval_samples: Optional[int] = field(
+        default=None,
+        metadata={"help": "Optional cap on the number of evaluation samples."},
+    )
+    image_size: int = field(
+        default=1000,
+        metadata={"help": "Target longest edge (pixels) after augmentation."},
+    )
+
+
+@dataclass
+class RunPodArguments:
+    """RunPod-specific conveniences."""
+
+    use_runpod_defaults: bool = field(
+        default=False,
+        metadata={"help": "Auto-configure cache/output paths for RunPod (also picks up RUNPOD_POD_ID)."},
+    )
+    workspace_dir: str = field(
+        default="/workspace",
+        metadata={"help": "Root directory of the RunPod workspace."},
+    )
+    cache_subdir: str = field(
+        default="hf-cache",
+        metadata={"help": "Sub-directory under workspace for Hugging Face caches."},
+    )
+    log_level: str = field(
+        default="INFO",
+        metadata={"help": "Logging level (DEBUG, INFO, WARNING, ERROR)."},
+    )
+    tensorboard_dir: Optional[str] = field(
+        default=None,
+        metadata={"help": "Override tensorboard logging directory."},
+    )
+
+
+def setup_logging(level: str) -> None:
+    """Initialize root logging."""
+    log_level = getattr(logging, level.upper(), logging.INFO)
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout)],
+        level=log_level,
+    )
+
+
+def ensure_dir(path: Optional[str]) -> None:
+    """Ensure a directory exists if path is provided."""
+    if path:
+        os.makedirs(path, exist_ok=True)
+
+
+def apply_runpod_defaults(
+    model_args: ModelArguments,
+    runpod_args: RunPodArguments,
+    training_args: TrainingArguments,
+) -> None:
+    """Apply sensible defaults when running inside a RunPod environment."""
+    runpod_detected = bool(os.getenv("RUNPOD_POD_ID"))
+    if not (runpod_detected or runpod_args.use_runpod_defaults):
+        return
+
+    workspace = runpod_args.workspace_dir or "/workspace"
+    cache_root = os.path.join(workspace, runpod_args.cache_subdir)
+    ensure_dir(cache_root)
+    ensure_dir(os.path.join(cache_root, "datasets"))
+    ensure_dir(os.path.join(cache_root, "hub"))
+
+    os.environ.setdefault("HF_HOME", cache_root)
+    os.environ.setdefault("HF_DATASETS_CACHE", os.path.join(cache_root, "datasets"))
+    os.environ.setdefault("TRANSFORMERS_CACHE", cache_root)
+    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", os.path.join(cache_root, "hub"))
+
+    if model_args.cache_dir is None:
+        model_args.cache_dir = cache_root
+
+    default_output = os.path.join(workspace, "outputs", "deformable-detr-commonforms")
+    if training_args.output_dir == "tmp_trainer" or training_args.output_dir is None:
+        training_args.output_dir = default_output
+    ensure_dir(training_args.output_dir)
+
+    if runpod_args.tensorboard_dir:
+        training_args.logging_dir = runpod_args.tensorboard_dir
+    elif training_args.logging_dir is None:
+        training_args.logging_dir = os.path.join(training_args.output_dir, "logs")
+    ensure_dir(training_args.logging_dir)
+
+    if training_args.report_to is None or training_args.report_to == []:
+        training_args.report_to = ["tensorboard"]
+
+    logger.info("RunPod defaults enabled. Using cache dir %s", model_args.cache_dir)
+    logger.info("Outputs will be stored in %s", training_args.output_dir)
+
+
+def detect_category_field(dataset: Iterable[Any]) -> Tuple[str, Optional[Any]]:
+    """Infer which key inside `objects` holds class labels."""
+    features = getattr(dataset, "features", None)
+    if features and "objects" in features:
+        inner_feature = getattr(features["objects"], "feature", None)
+        if inner_feature:
+            for candidate in CANDIDATE_CATEGORY_KEYS:
+                if candidate in inner_feature:
+                    return candidate, inner_feature[candidate]
+
+    sample = None
+    if isinstance(dataset, IterableDataset):
+        iterator = itertools.islice(dataset.take(5), 5)
+        for sample in iterator:
+            if sample:
+                break
+    else:
+        try:
+            if len(dataset) > 0:
+                sample = dataset[0]
+        except TypeError:
+            sample = None
+
+    if sample and "objects" in sample:
+        for candidate in CANDIDATE_CATEGORY_KEYS:
+            if candidate in sample["objects"]:
+                return candidate, None
+
+    raise ValueError(
+        "Could not determine category field inside `objects`. "
+        f"Tried keys: {', '.join(CANDIDATE_CATEGORY_KEYS)}"
+    )
+
+
+def gather_category_mapping(
+    dataset: Iterable[Any],
+    category_key: str,
+    category_feature: Optional[Any],
+    use_streaming: bool,
+    max_scan: int = 4000,
+) -> Tuple[Dict[Any, int], Dict[int, str]]:
+    """Build mapping from dataset category values to contiguous ids + readable labels."""
+    if category_feature is not None and hasattr(category_feature, "names"):
+        names = list(category_feature.names)
+        category_id_remap = {idx: idx for idx in range(len(names))}
+        id2label = {idx: name for idx, name in enumerate(names)}
+        return category_id_remap, id2label
+
+    seen: Dict[Any, int] = {}
+    unique_values: List[Any] = []
+
+    def _normalize(value: Any) -> Any:
+        if isinstance(value, np.generic):
+            return value.item()
+        return value
+
+    if use_streaming:
+        iterator = itertools.islice(dataset.take(max_scan), max_scan)
+        for example in iterator:
+            cats = (example or {}).get("objects", {}).get(category_key, [])
+            for value in cats:
+                value = _normalize(value)
+                if value not in seen:
+                    seen[value] = 1
+                    unique_values.append(value)
+    else:
+        try:
+            length = len(dataset)  # type: ignore[arg-type]
+        except TypeError:
+            length = max_scan
+        for idx in range(min(max_scan, length)):
+            example = dataset[idx]  # type: ignore[index]
+            cats = (example or {}).get("objects", {}).get(category_key, [])
+            for value in cats:
+                value = _normalize(value)
+                if value not in seen:
+                    seen[value] = 1
+                    unique_values.append(value)
+
+    if not unique_values:
+        unique_values = [0]
+
+    sorted_unique = sorted(unique_values, key=lambda v: (str(type(v)), str(v)))
+    category_id_remap = {orig: idx for idx, orig in enumerate(sorted_unique)}
+
+    id2label: Dict[int, str] = {}
+    for idx, orig in enumerate(sorted_unique):
+        label_name = str(orig)
+        if (
+            isinstance(orig, (int, np.integer))
+            and category_feature is not None
+            and hasattr(category_feature, "names")
+        ):
+            try:
+                label_name = category_feature.names[int(orig)]
+            except (IndexError, ValueError, TypeError):
+                label_name = str(orig)
+        id2label[idx] = label_name
+
+    return category_id_remap, id2label
+
+
+def formatted_annotations(image_id: int, category_ids: Sequence[int], bboxes: Sequence[Sequence[float]]) -> List[Dict[str, Any]]:
+    """Return annotations ready for the image processor."""
+    annotations: List[Dict[str, Any]] = []
     for category_id, box in zip(category_ids, bboxes):
         x, y, w, h = map(float, box)
         if w <= 0 or h <= 0:
@@ -85,8 +333,8 @@ def formatted_anns(image_id, category_ids, bboxes):
     return annotations
 
 
-def create_transforms(image_size, is_train=True):
-    """Create Albumentations transforms"""
+def create_transforms(image_size: int, is_train: bool) -> A.Compose:
+    """Albumentations pipelines for train/eval."""
     if is_train:
         return A.Compose(
             [
@@ -98,85 +346,97 @@ def create_transforms(image_size, is_train=True):
                 A.Rotate(limit=10, p=0.5),
                 A.RandomScale(scale_limit=0.2, p=0.5),
             ],
-            bbox_params=A.BboxParams(
-                format="coco",  # [x, y, width, height]
-                label_fields=["category_id"],
-            ),
+            bbox_params=A.BboxParams(format="coco", label_fields=["category_id"]),
         )
-    else:
-        return A.Compose(
-            [
-                A.LongestMaxSize(image_size),
-                A.PadIfNeeded(image_size, image_size, border_mode=0, value=(0, 0, 0)),
-            ],
-            bbox_params=A.BboxParams(
-                format="coco",
-                label_fields=["category_id"],
-            ),
-        )
+    return A.Compose(
+        [
+            A.LongestMaxSize(image_size),
+            A.PadIfNeeded(image_size, image_size, border_mode=0, value=(0, 0, 0)),
+        ],
+        bbox_params=A.BboxParams(format="coco", label_fields=["category_id"]),
+    )
 
 
-def _to_plain_value(value: Any):
-    """Recursively convert BatchFeature/maps to plain Python containers."""
+def _to_plain_value(value: Any) -> Any:
+    """Recursively convert BatchEncoding values to plain python containers."""
     if isinstance(value, list):
         return [_to_plain_value(v) for v in value]
     if hasattr(value, "items"):
-        return {k: _to_plain_value(v) for k, v in value.items()}
+        return {k: _to_plain_value(v) for k, v in value.items()}  # type: ignore[attr-defined]
     return value
 
 
-def transform_aug_ann(examples, transform, image_processor, category_key, category_id_remap):
-    """Apply augmentation and format for DETR"""
-    # The datasets library sometimes feeds single examples and sometimes batches.
-    # Normalize to lists so downstream code does not have to branch.
-    if isinstance(examples["image"], Image.Image):
-        image_ids = [examples["id"]]
+def _to_numpy_rgb(image: Any) -> np.ndarray:
+    """Convert PIL/np images to numpy RGB arrays."""
+    if isinstance(image, Image.Image):
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        return np.array(image)
+    if isinstance(image, np.ndarray):
+        if image.ndim == 2:
+            return np.stack([image] * 3, axis=-1)
+        if image.shape[-1] == 4:
+            return image[..., :3]
+        return image
+    raise TypeError(f"Unsupported image type: {type(image)}")
+
+
+def preprocess_examples(
+    examples: Dict[str, Any],
+    transform: A.Compose,
+    image_processor: AutoImageProcessor,
+    category_key: str,
+    category_id_remap: Dict[Any, int],
+) -> Dict[str, Any]:
+    """Apply augmentation + processor to a batch from datasets."""
+    if isinstance(examples["image"], (Image.Image, np.ndarray)):
+        image_ids = [examples.get("id", 0)]
         images = [examples["image"]]
-        objects_list = [examples["objects"]]
+        objects_list = [examples.get("objects", {})]
     else:
-        image_ids = examples["id"]
+        image_ids = examples.get("id", list(range(len(examples["image"]))))
         images = examples["image"]
         objects_list = examples["objects"]
-    
-    processed_images = []
-    processed_targets = []
-    
+
+    processed_images: List[np.ndarray] = []
+    processed_targets: List[Dict[str, Any]] = []
+
     for idx, (image_id, image, objects) in enumerate(zip(image_ids, images, objects_list)):
-        if isinstance(image, Image.Image):
-            image_rgb = image.convert("RGB")
-        else:
-            image_rgb = Image.fromarray(image).convert("RGB")
-        
-        image_np = np.array(image_rgb)
-        image_bgr = image_np[:, :, ::-1]
-        
-        raw_bboxes = objects.get("bbox", [])
-        raw_categories = objects.get(category_key) or objects.get("category_id") or objects.get("category") or []
-        
-        # Keep lengths aligned
+        try:
+            image_np = _to_numpy_rgb(image)
+        except Exception as exc:
+            logger.warning("Skipping sample %s due to image conversion error: %s", image_id, exc)
+            continue
+
+        if objects is None:
+            objects = {}
+
+        raw_bboxes = objects.get("bbox") or objects.get("boxes") or []
+        raw_categories = objects.get(category_key) or []
+
         if len(raw_bboxes) != len(raw_categories):
             min_len = min(len(raw_bboxes), len(raw_categories))
             raw_bboxes = raw_bboxes[:min_len]
             raw_categories = raw_categories[:min_len]
-        
-        normalized_categories = []
+
+        mapped_categories: List[int] = []
         for cat in raw_categories:
             if isinstance(cat, np.generic):
                 cat = cat.item()
-            normalized_categories.append(cat)
-        
-        mapped_categories = [category_id_remap.get(cat, 0) for cat in normalized_categories]
-        
-        transform_out = transform(
-            image=image_bgr,
+            mapped_categories.append(int(category_id_remap.get(cat, 0)))
+
+        albumentations_inputs = transform(
+            image=image_np[:, :, ::-1],  # Albumentations expects BGR
             bboxes=raw_bboxes,
             category_id=mapped_categories,
         )
-        
-        transformed_bboxes = []
-        transformed_categories = []
-        img_h, img_w = transform_out["image"].shape[:2]
-        for bbox, category_id in zip(transform_out["bboxes"], transform_out["category_id"]):
+
+        img_transformed = albumentations_inputs["image"]
+        img_h, img_w = img_transformed.shape[:2]
+        transformed_bboxes: List[List[float]] = []
+        transformed_categories: List[int] = []
+
+        for bbox, category_id in zip(albumentations_inputs["bboxes"], albumentations_inputs["category_id"]):
             x, y, w, h = map(float, bbox)
             if not np.isfinite([x, y, w, h]).all():
                 continue
@@ -190,14 +450,12 @@ def transform_aug_ann(examples, transform, image_processor, category_key, catego
                 continue
             transformed_bboxes.append([x, y, w, h])
             transformed_categories.append(int(category_id))
-        
-        if len(transformed_bboxes) == 0:
+
+        if not transformed_bboxes:
             transformed_bboxes = [[0.0, 0.0, 1.0, 1.0]]
-            default_label = int(mapped_categories[0]) if mapped_categories else 0
-            transformed_categories = [default_label]
-        
-        processed_images.append(transform_out["image"][:, :, ::-1].astype(np.uint8))
-        
+            fallback_label = transformed_categories[0] if transformed_categories else (mapped_categories[0] if mapped_categories else 0)
+            transformed_categories = [fallback_label]
+
         if isinstance(image_id, (int, np.integer)):
             target_image_id = int(image_id)
         else:
@@ -205,409 +463,314 @@ def transform_aug_ann(examples, transform, image_processor, category_key, catego
                 target_image_id = int(str(image_id))
             except (TypeError, ValueError):
                 target_image_id = idx
-        
+
+        processed_images.append(img_transformed[:, :, ::-1].astype(np.uint8))  # Convert back to RGB
         processed_targets.append(
-            {"image_id": target_image_id, "annotations": formatted_anns(target_image_id, transformed_categories, transformed_bboxes)}
+            {
+                "image_id": target_image_id,
+                "annotations": formatted_annotations(target_image_id, transformed_categories, transformed_bboxes),
+            }
         )
-    
+
+    if not processed_images:
+        raise ValueError("All samples were skipped during preprocessing. Check data integrity.")
+
     encoded = image_processor(images=processed_images, annotations=processed_targets, return_tensors="pt")
     encoded = {key: _to_plain_value(value) for key, value in encoded.items()}
-    
-    # Sanitize pixel tensors to avoid propagating NaNs further down the pipeline
+
     pixel_values = encoded.get("pixel_values")
     if isinstance(pixel_values, torch.Tensor):
         encoded["pixel_values"] = torch.nan_to_num(pixel_values.to(torch.float32), nan=0.0, posinf=0.0, neginf=0.0)
+
     pixel_mask = encoded.get("pixel_mask")
     if isinstance(pixel_mask, torch.Tensor):
         encoded["pixel_mask"] = torch.nan_to_num(pixel_mask.to(torch.float32), nan=0.0, posinf=0.0, neginf=0.0)
-    
-    # Clean labels to ensure no NaNs or empty tensors propagate to the Trainer
-    if "labels" in encoded:
-        cleaned_labels = []
-        for label in encoded["labels"]:
+
+    labels = encoded.get("labels")
+    if isinstance(labels, list):
+        cleaned_labels: List[Dict[str, Any]] = []
+        for label in labels:
             if not isinstance(label, dict):
                 cleaned_labels.append(label)
                 continue
-            
-            label_copy = dict(label)
-            boxes = label_copy.get("boxes")
-            class_labels = label_copy.get("class_labels")
-            
-            if isinstance(boxes, torch.Tensor):
-                device = boxes.device
-                boxes = torch.nan_to_num(boxes, nan=0.0, posinf=0.0, neginf=0.0)
-                boxes = boxes.to(torch.float32)
-                finite_mask = torch.isfinite(boxes).all(dim=1)
-                
-                if finite_mask.any():
-                    boxes = boxes[finite_mask]
-                    if isinstance(class_labels, torch.Tensor):
-                        class_labels = class_labels[finite_mask]
-                else:
-                    boxes = torch.empty(0, 4, dtype=boxes.dtype, device=device)
-                    if isinstance(class_labels, torch.Tensor):
-                        class_labels = class_labels.new_empty(0)
-                
-                if class_labels is None:
-                    class_labels = torch.zeros((boxes.shape[0],), dtype=torch.int64, device=device)
-                elif not isinstance(class_labels, torch.Tensor):
-                    class_labels = torch.tensor(class_labels, dtype=torch.int64, device=device)
-                else:
-                    class_labels = class_labels.to(dtype=torch.int64, device=device)
-                class_labels = class_labels.reshape(-1)
-                
-                if class_labels.shape[0] != boxes.shape[0]:
-                    min_len = min(class_labels.shape[0], boxes.shape[0])
-                    boxes = boxes[:min_len]
-                    class_labels = class_labels[:min_len]
-                
-                # Ensure at least one valid annotation remains
-                if boxes.numel() == 0:
-                    boxes = torch.tensor([[0.0, 0.0, 0.01, 0.01]], dtype=torch.float32, device=device)
-                    if isinstance(class_labels, torch.Tensor):
-                        class_labels = class_labels.new_zeros(1)
-                
-                if boxes.numel() > 0:
-                    boxes = boxes.clamp(0.0, 1.0)
-                    boxes[:, 2:] = boxes[:, 2:].clamp_min(1e-6)
 
-                label_copy["boxes"] = boxes
-                label_copy["class_labels"] = class_labels
-            
-            cleaned_labels.append(label_copy)
-        
+            boxes = label.get("boxes")
+            class_labels = label.get("class_labels")
+
+            if not isinstance(boxes, torch.Tensor):
+                boxes = torch.tensor(boxes, dtype=torch.float32)
+            else:
+                boxes = torch.nan_to_num(boxes.to(torch.float32), nan=0.0, posinf=0.0, neginf=0.0)
+
+            if class_labels is None:
+                class_labels = torch.zeros((boxes.shape[0],), dtype=torch.int64)
+            elif not isinstance(class_labels, torch.Tensor):
+                class_labels = torch.tensor(class_labels, dtype=torch.int64)
+            else:
+                class_labels = class_labels.to(torch.int64)
+
+            if boxes.shape[0] != class_labels.shape[0]:
+                length = min(boxes.shape[0], class_labels.shape[0])
+                boxes = boxes[:length]
+                class_labels = class_labels[:length]
+
+            if boxes.numel() == 0:
+                boxes = torch.tensor([[0.0, 0.0, 0.01, 0.01]], dtype=torch.float32)
+                class_labels = torch.zeros((1,), dtype=torch.int64)
+
+            boxes = boxes.clamp(0.0, 1.0)
+            if boxes.shape[-1] >= 4:
+                boxes[:, 2:] = boxes[:, 2:].clamp_min(1e-4)
+
+            label["boxes"] = boxes
+            label["class_labels"] = class_labels
+            cleaned_labels.append(label)
+
         encoded["labels"] = cleaned_labels
-    
+
     return encoded
 
 
-def collate_fn(batch):
-    """Custom collate function for DETR"""
-    pixel_values = []
-    for item in batch:
-        pv = item["pixel_values"]
-        if isinstance(pv, torch.Tensor) and pv.dim() > 3 and pv.shape[0] == 1:
+def collate_fn(features: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Custom collation for DETR-style object detection models."""
+    pixel_values: List[torch.Tensor] = []
+    pixel_masks: List[torch.Tensor] = []
+    labels: List[Any] = []
+
+    for feature in features:
+        pv = feature["pixel_values"]
+        if isinstance(pv, torch.Tensor) and pv.dim() == 4 and pv.shape[0] == 1:
             pv = pv.squeeze(0)
         pixel_values.append(pv)
-    pixel_masks = None
-    if "pixel_mask" in batch[0]:
-        pixel_masks = []
-        for item in batch:
-            pm = item["pixel_mask"]
-            if isinstance(pm, torch.Tensor) and pm.dim() > 3 and pm.shape[0] == 1:
+
+        if "pixel_mask" in feature:
+            pm = feature["pixel_mask"]
+            if isinstance(pm, torch.Tensor) and pm.dim() == 4 and pm.shape[0] == 1:
                 pm = pm.squeeze(0)
             pixel_masks.append(pm)
-    
-    batch_dict = {
+
+        labels.append(feature["labels"])
+
+    batch = {
         "pixel_values": torch.stack(pixel_values),
-        "labels": [item["labels"] for item in batch],
+        "labels": labels,
     }
-    if pixel_masks is not None:
-        batch_dict["pixel_mask"] = torch.stack(pixel_masks)
-    
-    return batch_dict
+    if pixel_masks:
+        batch["pixel_mask"] = torch.stack(pixel_masks)
+    return batch
 
 
-def main():
-    args = get_args()
-    
-    # Setup logging
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        level=logging.INFO,
-    )
-    
-    logger.info("="*80)
-    logger.info("Deformable DETR Training on CommonForms")
-    logger.info("="*80)
-    logger.info(f"Model: {args.model_name_or_path}")
-    logger.info(f"Dataset: {args.dataset_name}")
-    logger.info(f"Output: {args.output_dir}")
-    logger.info(f"Image size: {args.image_size}px")
-    logger.info("="*80)
-    
-    # Load dataset
+def resolve_split(dataset_dict: Any, candidates: Sequence[str]) -> Tuple[Optional[Any], Optional[str]]:
+    """Return the first matching split from the provided candidates."""
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if candidate in dataset_dict:
+            return dataset_dict[candidate], candidate
+    return None, None
+
+
+def limit_dataset(dataset: Any, max_samples: Optional[int], use_streaming: bool) -> Any:
+    """Trim datasets for quick experiments."""
+    if dataset is None or max_samples is None:
+        return dataset
+    if use_streaming:
+        return dataset.take(max_samples)
+    total = len(dataset)  # type: ignore[arg-type]
+    return dataset.select(range(min(max_samples, total)))
+
+
+def log_split_size(name: str, dataset: Any, use_streaming: bool) -> None:
+    """Log dataset length (if known)."""
+    if dataset is None:
+        return
+    try:
+        size = len(dataset)  # type: ignore[arg-type]
+        logger.info("%s split size: %d", name, size)
+    except TypeError:
+        if use_streaming:
+            logger.info("%s split size: streaming (unknown length)", name)
+        else:
+            logger.info("%s split size: unknown", name)
+
+
+def main() -> None:
+    parser = HfArgumentParser((ModelArguments, DataArguments, RunPodArguments, TrainingArguments))
+
+    if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
+        model_args, data_args, runpod_args, training_args = parser.parse_json_file(os.path.abspath(sys.argv[1]))
+    else:
+        model_args, data_args, runpod_args, training_args = parser.parse_args_into_dataclasses()
+
+    setup_logging(runpod_args.log_level)
+    apply_runpod_defaults(model_args, runpod_args, training_args)
+
+    logger.info("=" * 80)
+    logger.info("Deformable DETR finetuning on CommonForms (RunPod-ready)")
+    logger.info("=" * 80)
+    logger.info("Model: %s", model_args.model_name_or_path)
+    logger.info("Dataset: %s", data_args.dataset_name)
+    logger.info("Training output directory: %s", training_args.output_dir)
+    logger.info("Image size (longest edge): %d px", data_args.image_size)
+
+    training_args.remove_unused_columns = False
+
+    set_seed(training_args.seed)
+
+    if torch.cuda.is_available():
+        device_count = torch.cuda.device_count()
+        logger.info("Detected %d CUDA device(s).", device_count)
+        for idx in range(device_count):
+            logger.info("  GPU %d: %s", idx, torch.cuda.get_device_name(idx))
+    else:
+        logger.warning("CUDA is not available. Training will run on CPU.")
+
     logger.info("Loading dataset...")
     dataset = load_dataset(
-        args.dataset_name,
-        cache_dir=args.cache_dir,
+        data_args.dataset_name,
+        data_args.dataset_config_name,
+        cache_dir=model_args.cache_dir,
+        streaming=data_args.use_streaming,
     )
-    
-    # Get splits (CommonForms uses "train", "val", "test")
-    train_dataset = dataset["train"]
-    eval_dataset = dataset.get("val", dataset.get("test"))
-    
-    # Limit samples
-    if args.max_train_samples:
-        logger.info(f"Limiting training to {args.max_train_samples} samples")
-        train_dataset = train_dataset.select(range(min(args.max_train_samples, len(train_dataset))))
-    
-    if eval_dataset and args.max_eval_samples:
-        logger.info(f"Limiting eval to {args.max_eval_samples} samples")
-        eval_dataset = eval_dataset.select(range(min(args.max_eval_samples, len(eval_dataset))))
-    
-    # Determine category field and build label mappings
-    logger.info("Extracting categories...")
-    objects_feature = train_dataset.features.get("objects")
-    category_feature = None
-    category_key = None
-    
-    if objects_feature is not None:
-        inner_feature = getattr(objects_feature, "feature", None)
-        if inner_feature:
-            for candidate in ("category_id", "category", "label", "class"):
-                if candidate in inner_feature:
-                    category_key = candidate
-                    category_feature = inner_feature[candidate]
-                    break
-    
-    if category_key is None:
-        sample_example = train_dataset[0]
-        if "objects" in sample_example:
-            for candidate in ("category_id", "category", "label", "class"):
-                if candidate in sample_example["objects"]:
-                    category_key = candidate
-                    break
-    
-    if category_key is None:
-        raise ValueError("Could not determine category field in dataset. Expected one of ['category_id', 'category', 'label', 'class'].")
-    
-    logger.info(f"Using '{category_key}' as category field")
-    
-    # Collect unique category values (limit scanning for speed)
-    unique_categories = set()
-    max_scan = min(len(train_dataset), 2000)
-    for idx in range(max_scan):
-        example = train_dataset[idx]
-        cats = example.get("objects", {}).get(category_key, [])
-        for cat in cats:
-            if isinstance(cat, np.generic):
-                cat = cat.item()
-            unique_categories.add(cat)
-        if (
-            len(unique_categories) > 0
-            and category_feature is not None
-            and hasattr(category_feature, "num_classes")
-            and len(unique_categories) >= category_feature.num_classes
-        ):
-            break
-    
-    if not unique_categories:
-        logger.warning("No categories found while scanning data; defaulting to single class.")
-        unique_categories = {0}
-    
-    def sort_key(value):
-        return (str(type(value)), str(value))
-    
-    sorted_unique = sorted(unique_categories, key=sort_key)
-    
-    # Build mapping from original category value to contiguous IDs
-    category_id_remap = {orig: idx for idx, orig in enumerate(sorted_unique)}
-    
-    id2label = {}
-    for new_id, orig_value in enumerate(sorted_unique):
-        label_name = None
-        if category_feature is not None and hasattr(category_feature, "names"):
-            try:
-                label_name = category_feature.names[int(orig_value)]
-            except (TypeError, ValueError, KeyError, IndexError):
-                label_name = None
-        if label_name is None:
-            label_name = str(orig_value)
-        id2label[new_id] = label_name
-    
-    label2id = {v: k for k, v in id2label.items()}
-    
-    logger.info(f"Found {len(id2label)} categories: {list(id2label.values())}")
-    logger.info(f"Label mapping: {id2label}")
-    if len(category_id_remap) <= 20:
-        logger.info(f"Category remap (dataset -> model indices): {category_id_remap}")
+
+    if isinstance(dataset, (Dataset, IterableDataset)):
+        dataset_dict: Dict[str, Any] = {data_args.train_split: dataset}
     else:
-        preview_items = list(category_id_remap.items())[:10]
-        logger.info(f"Category remap sample (dataset -> model indices): {preview_items} ...")
-    
-    # Load image processor (same as AutoTrain)
-    logger.info(f"Loading image processor from {args.model_name_or_path}")
-    image_processor = AutoImageProcessor.from_pretrained(
-        args.model_name_or_path,
-        cache_dir=args.cache_dir,
-        do_pad=False,  # Padding done in Albumentations
-        do_resize=False,  # Resize done in Albumentations
-        size={"longest_edge": args.image_size},
+        dataset_dict = dict(dataset)
+
+    train_candidates = (data_args.train_split, "train", "training")
+    eval_candidates = (data_args.eval_split, "val", "validation", "test")
+
+    train_dataset, actual_train_name = resolve_split(dataset_dict, train_candidates)
+    eval_dataset, actual_eval_name = resolve_split(dataset_dict, eval_candidates)
+
+    if training_args.do_train and train_dataset is None:
+        raise ValueError(f"Could not locate a training split. Tried: {train_candidates}")
+
+    if training_args.do_eval and eval_dataset is None:
+        logger.warning("Evaluation requested but no eval split found. Skipping evaluation.")
+        training_args.do_eval = False
+
+    if training_args.do_train and data_args.max_train_samples:
+        train_dataset = limit_dataset(train_dataset, data_args.max_train_samples, data_args.use_streaming)
+
+    if training_args.do_eval and data_args.max_eval_samples:
+        eval_dataset = limit_dataset(eval_dataset, data_args.max_eval_samples, data_args.use_streaming)
+
+    log_split_size(actual_train_name or "train", train_dataset, data_args.use_streaming)
+    log_split_size(actual_eval_name or "eval", eval_dataset, data_args.use_streaming)
+
+    category_dataset = train_dataset or eval_dataset
+    if category_dataset is None:
+        raise ValueError("Unable to infer categories: no dataset split available.")
+
+    category_key, category_feature = detect_category_field(category_dataset)
+    category_id_remap, id2label = gather_category_mapping(
+        category_dataset,
+        category_key,
+        category_feature,
+        data_args.use_streaming,
     )
-    
-    # Load model (same as AutoTrain)
-    logger.info(f"Loading model from {args.model_name_or_path}")
+    label2id = {label: idx for idx, label in id2label.items()}
+
+    logger.info("Detected %d categories.", len(id2label))
+    if len(id2label) <= 20:
+        logger.info("Labels: %s", id2label)
+        logger.info("Category remap (dataset -> contiguous id): %s", category_id_remap)
+    else:
+        preview = list(id2label.items())[:20]
+        logger.info("First 20 labels: %s ...", preview)
+
+    processor_name = model_args.processor_name or model_args.model_name_or_path
+    image_processor = AutoImageProcessor.from_pretrained(
+        processor_name,
+        cache_dir=model_args.cache_dir,
+        revision=model_args.revision,
+        do_resize=False,
+        do_pad=False,
+        size={"longest_edge": data_args.image_size},
+    )
+
+    config_name = model_args.config_name or model_args.model_name_or_path
     model_config = AutoConfig.from_pretrained(
-        args.model_name_or_path,
+        config_name,
+        cache_dir=model_args.cache_dir,
+        revision=model_args.revision,
         label2id=label2id,
         id2label=id2label,
-        cache_dir=args.cache_dir,
     )
     model_config.num_labels = len(id2label)
-    
-    try:
-        model = AutoModelForObjectDetection.from_pretrained(
-            args.model_name_or_path,
-            config=model_config,
-            cache_dir=args.cache_dir,
-            ignore_mismatched_sizes=True,
-        )
-    except OSError:
-        # Fallback for TensorFlow models
-        model = AutoModelForObjectDetection.from_pretrained(
-            args.model_name_or_path,
-            config=model_config,
-            cache_dir=args.cache_dir,
-            ignore_mismatched_sizes=True,
-            from_tf=True,
-        )
-    
-    logger.info(f"Model loaded with {len(id2label)} classes")
-    
-    # Create transforms
-    train_transform = create_transforms(args.image_size, is_train=True)
-    eval_transform = create_transforms(args.image_size, is_train=False)
-    
-    # Apply transforms with datasets
-    logger.info("Applying transforms...")
-    
-    def transform_train(examples):
-        return transform_aug_ann(examples, train_transform, image_processor, category_key, category_id_remap)
-    
-    def transform_eval(examples):
-        return transform_aug_ann(examples, eval_transform, image_processor, category_key, category_id_remap)
-    
-    # Use with_transform for lazy loading (better for large datasets)
-    train_dataset_transformed = train_dataset.with_transform(transform_train)
-    eval_dataset_transformed = eval_dataset.with_transform(transform_eval) if eval_dataset else None
-    
-    logger.info("Transforms applied!")
 
-    # Run a quick sanity check to surface NaNs/shape issues early
-    try:
-        debug_sample = train_dataset_transformed[0]
-        debug_labels = debug_sample.get("labels", [])
-        if isinstance(debug_labels, list) and len(debug_labels) > 0:
-            debug_boxes = debug_labels[0].get("boxes")
-            if isinstance(debug_boxes, torch.Tensor) and debug_boxes.ndim == 2 and debug_boxes.numel() > 0:
-                if torch.isnan(debug_boxes).any():
-                    logger.warning("Detected NaNs in first sample boxes after preprocessing. They will be clamped.")
-                if (debug_boxes[:, 2:] <= 0).any():
-                    logger.warning("Detected non-positive widths/heights in first sample boxes after preprocessing.")
-    except Exception as dbg_err:
-        logger.warning(f"Sanity check on transformed dataset failed: {dbg_err}")
-    
-    # Training arguments (consistent with AutoTrain)
-    training_args_dict = {
-        "output_dir": args.output_dir,
-        "num_train_epochs": args.num_train_epochs,
-        "per_device_train_batch_size": args.per_device_train_batch_size,
-        "per_device_eval_batch_size": args.per_device_eval_batch_size,
-        "learning_rate": args.learning_rate,
-        "lr_scheduler_type": args.lr_scheduler_type,
-        "weight_decay": args.weight_decay,
-        "warmup_ratio": args.warmup_ratio,
-        "max_grad_norm": args.max_grad_norm,
-        "dataloader_num_workers": args.dataloader_num_workers,
-        "logging_steps": args.logging_steps,
-        "save_steps": args.save_steps,
-        "save_strategy": "steps",
-        "save_total_limit": args.save_total_limit,
-        "remove_unused_columns": False,
-        "push_to_hub": args.push_to_hub,
-        "seed": args.seed,
-        "dataloader_pin_memory": True,
-        "report_to": "tensorboard",
-        "ddp_find_unused_parameters": False,
-    }
-    
-    # Add eval-specific args
-    if args.do_eval:
-        training_args_dict["eval_steps"] = args.eval_steps
-        training_args_dict["eval_strategy"] = "steps"
-        training_args_dict["load_best_model_at_end"] = True
-        training_args_dict["eval_do_concat_batches"] = False  # Same as AutoTrain
-    else:
-        training_args_dict["eval_strategy"] = "no"
-    
-    # Add FP16
-    if args.fp16:
-        training_args_dict["fp16"] = True
-    
-    # Add hub model ID if pushing
-    if args.push_to_hub and args.hub_model_id:
-        training_args_dict["hub_model_id"] = args.hub_model_id
-    
-    training_args = TrainingArguments(**training_args_dict)
-    
-    # Initialize trainer
-    logger.info("Initializing Trainer...")
-    
+    logger.info("Loading model weights...")
+    model = AutoModelForObjectDetection.from_pretrained(
+        model_args.model_name_or_path,
+        cache_dir=model_args.cache_dir,
+        revision=model_args.revision,
+        config=model_config,
+        ignore_mismatched_sizes=True,
+    )
+    logger.info("Model loaded with %d detection classes.", model.config.num_labels)
+
+    train_transform = create_transforms(data_args.image_size, is_train=True)
+    eval_transform = create_transforms(data_args.image_size, is_train=False)
+
+    def transform_train(batch: Dict[str, Any]) -> Dict[str, Any]:
+        return preprocess_examples(batch, train_transform, image_processor, category_key, category_id_remap)
+
+    def transform_eval(batch: Dict[str, Any]) -> Dict[str, Any]:
+        return preprocess_examples(batch, eval_transform, image_processor, category_key, category_id_remap)
+
+    if training_args.do_train and train_dataset is not None:
+        train_dataset = train_dataset.with_transform(transform_train)
+
+    if training_args.do_eval and eval_dataset is not None:
+        eval_dataset = eval_dataset.with_transform(transform_eval)
+
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=train_dataset_transformed if args.do_train else None,
-        eval_dataset=eval_dataset_transformed if args.do_eval else None,
+        train_dataset=train_dataset if training_args.do_train else None,
+        eval_dataset=eval_dataset if training_args.do_eval else None,
         data_collator=collate_fn,
-        tokenizer=image_processor,  # For saving
+        tokenizer=image_processor,
     )
 
-    # Inspect the first batch before training to ensure tensors are finite
-    if args.do_train:
+    if training_args.do_train:
+        logger.info("=" * 80)
+        logger.info("Starting training")
+        logger.info("=" * 80)
         try:
-            debug_loader = trainer.get_train_dataloader()
-            first_batch = next(iter(debug_loader))
-            if isinstance(first_batch, dict):
-                pv = first_batch.get("pixel_values")
-                if isinstance(pv, torch.Tensor) and torch.isnan(pv).any():
-                    raise ValueError("Detected NaNs in training pixel_values before training starts.")
-                labels = first_batch.get("labels", [])
-                for idx, label in enumerate(labels):
-                    if isinstance(label, dict):
-                        boxes = label.get("boxes")
-                        if isinstance(boxes, torch.Tensor) and torch.isnan(boxes).any():
-                            raise ValueError(f"Detected NaNs in training boxes for sample {idx} before training starts.")
-            del first_batch
+            first_batch = next(iter(trainer.get_train_dataloader()))
+            pv = first_batch.get("pixel_values")
+            if isinstance(pv, torch.Tensor) and torch.isnan(pv).any():
+                raise ValueError("NaNs detected in first training batch pixel_values.")
         except StopIteration:
-            logger.warning("Training dataloader is empty during sanity inspection.")
-        except Exception as loader_err:
-            logger.error(f"Sanity inspection of training dataloader failed: {loader_err}")
+            logger.warning("Training dataloader yielded no batches during sanity check.")
+        except Exception as exc:
+            logger.error("Sanity check on training dataloader failed: %s", exc)
             raise
-    
-    # Train
-    if args.do_train:
-        logger.info("="*80)
-        logger.info("Starting training...")
-        logger.info("="*80)
+
         train_result = trainer.train()
         trainer.save_model()
-        
-        metrics = train_result.metrics
-        trainer.log_metrics("train", metrics)
-        trainer.save_metrics("train", metrics)
+        trainer.log_metrics("train", train_result.metrics)
+        trainer.save_metrics("train", train_result.metrics)
         trainer.save_state()
-    
-    # Evaluate
-    if args.do_eval:
-        logger.info("="*80)
-        logger.info("Evaluating...")
-        logger.info("="*80)
+
+    if training_args.do_eval and eval_dataset is not None:
+        logger.info("=" * 80)
+        logger.info("Running evaluation")
+        logger.info("=" * 80)
         metrics = trainer.evaluate()
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
-    
-    # Push to hub
-    if args.push_to_hub:
-        logger.info("="*80)
-        logger.info("Pushing to Hub...")
-        logger.info("="*80)
+
+    if training_args.push_to_hub:
+        logger.info("Pushing model and artifacts to the Hub...")
         trainer.push_to_hub()
-    
-    logger.info("="*80)
-    logger.info("Done!")
-    logger.info("="*80)
+
+    logger.info("=" * 80)
+    logger.info("Job complete.")
+    logger.info("=" * 80)
 
 
 if __name__ == "__main__":
