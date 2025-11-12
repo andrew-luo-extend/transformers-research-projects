@@ -424,8 +424,14 @@ def preprocess_examples(
     image_processor: AutoImageProcessor,
     category_key: str,
     category_id_remap: Dict[Any, int],
+    allow_empty_samples: bool = False,
 ) -> Dict[str, Any]:
-    """Apply augmentation + processor to a batch from datasets."""
+    """Apply augmentation + processor to a batch from datasets.
+
+    Args:
+        allow_empty_samples: If True, process samples with no annotations as negative samples.
+                           If False, skip them entirely.
+    """
     if isinstance(examples["image"], (Image.Image, np.ndarray)):
         image_ids = [examples.get("id", 0)]
         images = [examples["image"]]
@@ -699,8 +705,9 @@ def preprocess_examples(
 def collate_fn(features: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Custom collation for DETR-style object detection models.
 
-    Note: Ensures at least one sample in the batch has objects to avoid
-    Hungarian matching issues with all-empty batches.
+    Handles batches with empty samples by ensuring at least one non-empty sample
+    when possible. If all samples are empty, adds a dummy annotation to avoid
+    Hungarian matcher issues.
     """
     pixel_values: List[torch.Tensor] = []
     pixel_masks: List[torch.Tensor] = []
@@ -732,8 +739,14 @@ def collate_fn(features: List[Dict[str, Any]]) -> Dict[str, Any]:
             all_empty = False
             break
 
-    if all_empty:
-        logger.warning("Batch contains only empty samples (no objects). This may cause training issues with the Hungarian matcher.")
+    # If all empty, add a tiny dummy box to the first sample to avoid matcher crash
+    if all_empty and labels:
+        logger.debug("Batch contains only empty samples. Adding dummy annotation to first sample.")
+        first_label = labels[0]
+        if isinstance(first_label, dict):
+            # Add a tiny dummy box in the corner with label 0
+            first_label["boxes"] = torch.tensor([[0.0, 0.0, 0.01, 0.01]], dtype=torch.float32)
+            first_label["class_labels"] = torch.tensor([0], dtype=torch.int64)
 
     batch = {
         "pixel_values": torch.stack(pixel_values),
@@ -861,41 +874,9 @@ def main() -> None:
         logger.warning("Evaluation requested but no eval split found. Skipping evaluation.")
         training_args.do_eval = False
 
-    # Filter out empty annotations if requested
-    # Note: DETR models can handle negative samples (empty annotations), but batches containing
-    # ONLY empty samples will cause issues with the Hungarian matcher. Use with caution.
-    if data_args.filter_empty_annotations:
-        if train_dataset is not None and not data_args.use_streaming:
-            logger.info("=" * 80)
-            logger.info("Filtering training dataset to remove samples without annotations...")
-            original_size = len(train_dataset)
-            logger.info(f"Original training set size: {original_size}")
-            logger.info("This may take a while for large datasets...")
-            train_dataset = train_dataset.filter(
-                filter_empty_annotations,
-                num_proc=4,  # Use multiple processes for faster filtering
-                desc="Filtering empty samples from training set"
-            )
-            filtered_size = len(train_dataset)
-            logger.info(f"Filtered {original_size - filtered_size} empty samples from training set ({filtered_size} remaining)")
-            logger.info("=" * 80)
-
-            if filtered_size == 0:
-                raise ValueError("After filtering empty samples, no training samples remain. Your dataset may only contain empty annotations.")
-
-        if eval_dataset is not None and not data_args.use_streaming:
-            logger.info("Filtering evaluation dataset to remove samples without annotations...")
-            original_size = len(eval_dataset)
-            logger.info(f"Original eval set size: {original_size}")
-            eval_dataset = eval_dataset.filter(
-                filter_empty_annotations,
-                num_proc=4,
-                desc="Filtering empty samples from eval set"
-            )
-            filtered_size = len(eval_dataset)
-            logger.info(f"Filtered {original_size - filtered_size} empty samples from evaluation set ({filtered_size} remaining)")
-    else:
-        logger.info("Keeping samples with empty annotations (negative samples). WARNING: Batches with only empty samples may cause training failures.")
+    # Note: We keep all samples including empty ones. The custom collator will handle
+    # ensuring batches don't contain ONLY empty samples to avoid Hungarian matcher issues.
+    logger.info("Keeping all samples (including those with no annotations)")
 
     if training_args.do_train and data_args.max_train_samples:
         train_dataset = limit_dataset(train_dataset, data_args.max_train_samples, data_args.use_streaming)
