@@ -75,11 +75,14 @@ class RobustTrainer(Trainer):
         self.skipped_batches = 0
         self.total_batches = 0
 
-    def training_step(self, model, inputs):
+    def training_step(self, model, inputs, num_items_in_batch=None):
         """Override training_step to catch and skip batches that cause errors."""
         self.total_batches += 1
         try:
-            return super().training_step(model, inputs)
+            if num_items_in_batch is not None:
+                return super().training_step(model, inputs, num_items_in_batch)
+            else:
+                return super().training_step(model, inputs)
         except (ValueError, RuntimeError) as e:
             error_msg = str(e)
             # Check if it's a known recoverable error (Hungarian matcher, invalid values, etc.)
