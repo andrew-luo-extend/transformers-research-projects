@@ -83,7 +83,7 @@ class RobustTrainer(Trainer):
                 return super().training_step(model, inputs, num_items_in_batch)
             else:
                 return super().training_step(model, inputs)
-        except (ValueError, RuntimeError) as e:
+        except (ValueError, RuntimeError, AssertionError) as e:
             error_msg = str(e)
             # Check if it's a known recoverable error (Hungarian matcher, invalid values, etc.)
             if any(keyword in error_msg.lower() for keyword in [
@@ -93,14 +93,20 @@ class RobustTrainer(Trainer):
                 "nan",
                 "inf",
                 "invalid numeric",
+                "attempted unscale_",
             ]):
                 self.skipped_batches += 1
                 logger.warning(
                     f"Skipping batch {self.total_batches} due to error: {error_msg[:100]}... "
                     f"(Total skipped: {self.skipped_batches}/{self.total_batches})"
                 )
-                # Return a dummy loss to continue training
-                return torch.tensor(0.0, device=model.device, requires_grad=True)
+                # Return a zero tensor without gradient to avoid affecting the training
+                # We need to return the loss divided by gradient accumulation steps
+                # to match what the normal training step would return
+                loss = torch.tensor(0.0, device=model.device)
+                if self.args.gradient_accumulation_steps > 1:
+                    loss = loss / self.args.gradient_accumulation_steps
+                return loss.detach()
             else:
                 # Re-raise if it's not a known recoverable error
                 raise
