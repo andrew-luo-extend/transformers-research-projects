@@ -679,6 +679,11 @@ def preprocess_examples(
             if boxes.numel() == 0:
                 boxes = torch.tensor([[0.0, 0.0, 0.01, 0.01]], dtype=torch.float32)
                 class_labels = torch.zeros((1,), dtype=torch.int64)
+                # Skip further processing for dummy boxes
+                label["boxes"] = boxes
+                label["class_labels"] = class_labels
+                cleaned_labels.append(label)
+                continue
 
             finite_mask = torch.isfinite(boxes).all(dim=1)
             if finite_mask.any():
