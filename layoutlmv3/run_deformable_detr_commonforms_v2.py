@@ -829,13 +829,19 @@ def main() -> None:
     else:
         logger.warning("CUDA is not available. Training will run on CPU.")
 
-    logger.info("Loading dataset...")
+    logger.info("Loading dataset: %s", data_args.dataset_name)
+    if data_args.dataset_config_name:
+        logger.info("  Config: %s", data_args.dataset_config_name)
+    logger.info("  Streaming: %s", data_args.use_streaming)
+    logger.info("  Cache dir: %s", model_args.cache_dir)
+
     dataset = load_dataset(
         data_args.dataset_name,
         data_args.dataset_config_name,
         cache_dir=model_args.cache_dir,
         streaming=data_args.use_streaming,
     )
+    logger.info("Dataset loaded successfully")
 
     if isinstance(dataset, (Dataset, IterableDataset)):
         dataset_dict: Dict[str, Any] = {data_args.train_split: dataset}
@@ -860,11 +866,19 @@ def main() -> None:
     # ONLY empty samples will cause issues with the Hungarian matcher. Use with caution.
     if data_args.filter_empty_annotations:
         if train_dataset is not None and not data_args.use_streaming:
+            logger.info("=" * 80)
             logger.info("Filtering training dataset to remove samples without annotations...")
             original_size = len(train_dataset)
-            train_dataset = train_dataset.filter(filter_empty_annotations)
+            logger.info(f"Original training set size: {original_size}")
+            logger.info("This may take a while for large datasets...")
+            train_dataset = train_dataset.filter(
+                filter_empty_annotations,
+                num_proc=4,  # Use multiple processes for faster filtering
+                desc="Filtering empty samples from training set"
+            )
             filtered_size = len(train_dataset)
             logger.info(f"Filtered {original_size - filtered_size} empty samples from training set ({filtered_size} remaining)")
+            logger.info("=" * 80)
 
             if filtered_size == 0:
                 raise ValueError("After filtering empty samples, no training samples remain. Your dataset may only contain empty annotations.")
@@ -872,7 +886,12 @@ def main() -> None:
         if eval_dataset is not None and not data_args.use_streaming:
             logger.info("Filtering evaluation dataset to remove samples without annotations...")
             original_size = len(eval_dataset)
-            eval_dataset = eval_dataset.filter(filter_empty_annotations)
+            logger.info(f"Original eval set size: {original_size}")
+            eval_dataset = eval_dataset.filter(
+                filter_empty_annotations,
+                num_proc=4,
+                desc="Filtering empty samples from eval set"
+            )
             filtered_size = len(eval_dataset)
             logger.info(f"Filtered {original_size - filtered_size} empty samples from evaluation set ({filtered_size} remaining)")
     else:
