@@ -63,6 +63,46 @@ logger = logging.getLogger(__name__)
 CANDIDATE_CATEGORY_KEYS: Tuple[str, ...] = ("category_id", "category", "label", "class", "id")
 
 
+class RobustTrainer(Trainer):
+    """Custom Trainer that catches errors during training step and skips problematic batches.
+
+    This allows training to continue even when some samples cause issues (e.g., empty
+    annotations causing Hungarian matcher errors).
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.skipped_batches = 0
+        self.total_batches = 0
+
+    def training_step(self, model, inputs):
+        """Override training_step to catch and skip batches that cause errors."""
+        self.total_batches += 1
+        try:
+            return super().training_step(model, inputs)
+        except (ValueError, RuntimeError) as e:
+            error_msg = str(e)
+            # Check if it's a known recoverable error (Hungarian matcher, invalid values, etc.)
+            if any(keyword in error_msg.lower() for keyword in [
+                "matrix contains invalid",
+                "hungarian",
+                "cost matrix",
+                "nan",
+                "inf",
+                "invalid numeric",
+            ]):
+                self.skipped_batches += 1
+                logger.warning(
+                    f"Skipping batch {self.total_batches} due to error: {error_msg[:100]}... "
+                    f"(Total skipped: {self.skipped_batches}/{self.total_batches})"
+                )
+                # Return a dummy loss to continue training
+                return torch.tensor(0.0, device=model.device, requires_grad=True)
+            else:
+                # Re-raise if it's not a known recoverable error
+                raise
+
+
 @dataclass
 class ModelArguments:
     """Model configuration."""
@@ -126,10 +166,10 @@ class DataArguments:
         metadata={"help": "Target longest edge (pixels) after augmentation."},
     )
     filter_empty_annotations: bool = field(
-        default=True,
+        default=False,
         metadata={
-            "help": "Filter out samples with no bounding boxes. Set to False to keep negative samples, "
-            "but be aware that batches with only empty samples may cause training issues."
+            "help": "Filter out samples with no bounding boxes. Set to True to remove negative samples. "
+            "When False, samples that cause errors will be caught and skipped during training."
         },
     )
 
@@ -879,8 +919,8 @@ def main() -> None:
         logger.warning("Evaluation requested but no eval split found. Skipping evaluation.")
         training_args.do_eval = False
 
-    # Filter out empty annotations to avoid Hungarian matcher issues
-    # The Hungarian matcher cannot handle samples with no boxes, even with dummy boxes
+    # Optionally filter out empty annotations
+    # When disabled, RobustTrainer will catch and skip batches that cause errors
     if data_args.filter_empty_annotations:
         if train_dataset is not None and not data_args.use_streaming:
             logger.info("Filtering training dataset to remove samples without annotations...")
@@ -976,7 +1016,7 @@ def main() -> None:
     if training_args.do_eval and eval_dataset is not None:
         eval_dataset = eval_dataset.with_transform(transform_eval)
 
-    trainer = Trainer(
+    trainer = RobustTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
