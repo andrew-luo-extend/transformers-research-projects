@@ -7,6 +7,7 @@ This script trains **Deformable DETR** (from [Aryn/deformable-detr-DocLayNet](ht
 ### Why Deformable DETR?
 
 **Advantages over Regular DETR:**
+
 - ✅ **Better small object detection** (checkboxes, small text fields)
 - ✅ **2x faster training** (converges in 30-50 epochs vs 75-100)
 - ✅ **Multi-scale deformable attention** (handles varying object sizes)
@@ -15,6 +16,7 @@ This script trains **Deformable DETR** (from [Aryn/deformable-detr-DocLayNet](ht
 - ✅ **State-of-the-art for document detection**
 
 **Model Performance:**
+
 - Trained on 80K DocLayNet pages
 - 57.1 mAP on DocLayNet benchmark
 - 11 document categories (text, tables, headers, etc.)
@@ -190,7 +192,7 @@ accelerate launch \
 
 **Template:** PyTorch 2.1 or latest  
 **GPU:** H100 (80GB) or 4x L40S (192GB)  
-**Disk:** 50 GB minimum  
+**Disk:** 50 GB minimum
 
 ### **Step 2: Install Dependencies**
 
@@ -202,7 +204,7 @@ pip install transformers datasets accelerate pillow pycocotools huggingface_hub 
 
 ```bash
 cd /workspace
-git clone https://github.com/huggingface/transformers-research-projects.git
+git clone https://github.com/andrew-luo-extend/transformers-research-projects.git
 cd transformers-research-projects/layoutlmv3
 ```
 
@@ -230,7 +232,7 @@ python run_deformable_detr_commonforms.py \
   --do_train \
   --do_eval \
   --push_to_hub \
-  --hub_model_id YOUR_USERNAME/deformable-detr-commonforms
+  --hub_model_id andrewluo/deformable-detr-commonforms
 
 # Detach: Ctrl+b, then d
 # Reattach: tmux a -t training
@@ -242,42 +244,42 @@ python run_deformable_detr_commonforms.py \
 
 ### **Batch Size**
 
-| GPU | VRAM | Recommended Batch Size | Notes |
-|-----|------|------------------------|-------|
-| **H100** | 80GB | **16-20** | Optimal for 1000px images |
-| **L40S (single)** | 48GB | **12-14** | Good balance |
-| **4x L40S** | 192GB | **12 per GPU** (48 total) | Multi-GPU |
-| **A100** | 80GB | **16-20** | Same as H100 |
-| **RTX 4090** | 24GB | **6-8** | Lower memory |
+| GPU               | VRAM  | Recommended Batch Size    | Notes                     |
+| ----------------- | ----- | ------------------------- | ------------------------- |
+| **H100**          | 80GB  | **16-20**                 | Optimal for 1000px images |
+| **L40S (single)** | 48GB  | **12-14**                 | Good balance              |
+| **4x L40S**       | 192GB | **12 per GPU** (48 total) | Multi-GPU                 |
+| **A100**          | 80GB  | **16-20**                 | Same as H100              |
+| **RTX 4090**      | 24GB  | **6-8**                   | Lower memory              |
 
 ### **Learning Rate**
 
-| Scenario | Learning Rate | Explanation |
-|----------|---------------|-------------|
-| **Fine-tuning from DocLayNet** | **5e-5** | Default, recommended |
-| **Large dataset (100K+)** | **1e-4** | Can train faster |
-| **Small dataset (<10K)** | **3e-5** | Lower to prevent overfit |
-| **Training from scratch** | **1e-4** | Higher initial LR |
+| Scenario                       | Learning Rate | Explanation              |
+| ------------------------------ | ------------- | ------------------------ |
+| **Fine-tuning from DocLayNet** | **5e-5**      | Default, recommended     |
+| **Large dataset (100K+)**      | **1e-4**      | Can train faster         |
+| **Small dataset (<10K)**       | **3e-5**      | Lower to prevent overfit |
+| **Training from scratch**      | **1e-4**      | Higher initial LR        |
 
 ### **Epochs**
 
-| Dataset Size | Recommended Epochs | Training Time (H100) |
-|--------------|-------------------|---------------------|
-| **< 10K** | 50-75 | 4-6 hours |
-| **10K - 50K** | 30-50 | 8-12 hours |
-| **50K - 200K** | 20-30 | 15-25 hours |
-| **200K+** | 15-25 | 30-50 hours |
+| Dataset Size   | Recommended Epochs | Training Time (H100) |
+| -------------- | ------------------ | -------------------- |
+| **< 10K**      | 50-75              | 4-6 hours            |
+| **10K - 50K**  | 30-50              | 8-12 hours           |
+| **50K - 200K** | 20-30              | 15-25 hours          |
+| **200K+**      | 15-25              | 30-50 hours          |
 
 **Note:** Deformable DETR converges 2x faster than regular DETR!
 
 ### **Image Size**
 
-| Image Size | Use Case | VRAM Usage | Max Batch Size (H100) |
-|------------|----------|------------|-----------------------|
-| **800px** | Fast training, decent quality | Lower | 24-28 |
-| **1000px** | **Recommended balance** | Medium | **16-20** |
-| **1200px** | Better small object detection | Higher | 12-14 |
-| **1500px** | Maximum quality | Very high | 8-10 |
+| Image Size | Use Case                      | VRAM Usage | Max Batch Size (H100) |
+| ---------- | ----------------------------- | ---------- | --------------------- |
+| **800px**  | Fast training, decent quality | Lower      | 24-28                 |
+| **1000px** | **Recommended balance**       | Medium     | **16-20**             |
+| **1200px** | Better small object detection | Higher     | 12-14                 |
+| **1500px** | Maximum quality               | Very high  | 8-10                  |
 
 ---
 
@@ -286,6 +288,7 @@ python run_deformable_detr_commonforms.py \
 ### **Healthy Training Metrics**
 
 **Epoch 1:**
+
 ```
 Loss: 4.5 - 6.5
 Grad norm: 20-80
@@ -293,6 +296,7 @@ LR: Climbing to 5e-5
 ```
 
 **Epoch 5:**
+
 ```
 Loss: 2.0 - 3.5
 Grad norm: 15-60
@@ -300,6 +304,7 @@ LR: 5e-5 (peak)
 ```
 
 **Epoch 15:**
+
 ```
 Loss: 1.0 - 2.0
 Grad norm: 10-40
@@ -307,6 +312,7 @@ LR: ~4e-5 (decaying)
 ```
 
 **Epoch 30:**
+
 ```
 Loss: 0.5 - 1.0
 Grad norm: 5-30
@@ -315,11 +321,11 @@ LR: ~1e-5 (low)
 
 ### **Performance Expectations**
 
-| Dataset Size | Expected mAP | Training Time | Cost (H100 @ $2.50/hr) |
-|--------------|--------------|---------------|------------------------|
-| **10K pages** | 0.75-0.85 | 5-8 hours | $12-20 |
-| **50K pages** | 0.82-0.90 | 15-20 hours | $37-50 |
-| **450K pages** | 0.87-0.92 | 50-70 hours | $125-175 |
+| Dataset Size   | Expected mAP | Training Time | Cost (H100 @ $2.50/hr) |
+| -------------- | ------------ | ------------- | ---------------------- |
+| **10K pages**  | 0.75-0.85    | 5-8 hours     | $12-20                 |
+| **50K pages**  | 0.82-0.90    | 15-20 hours   | $37-50                 |
+| **450K pages** | 0.87-0.92    | 50-70 hours   | $125-175               |
 
 ---
 
@@ -328,6 +334,7 @@ LR: ~1e-5 (low)
 ### **Issue: CUDA Out of Memory**
 
 **Solutions:**
+
 ```bash
 # Option 1: Reduce batch size
 --per_device_train_batch_size 12
@@ -346,12 +353,14 @@ LR: ~1e-5 (low)
 ### **Issue: Training Too Slow**
 
 **Check:**
+
 1. **GPU utilization**: `nvidia-smi` should show 90-100%
 2. **CPU workers**: Increase to 8-16
 3. **Batch size**: Increase if memory allows
 4. **Data loading**: Use `--dataloader_pin_memory True`
 
 **Fix:**
+
 ```bash
 --dataloader_num_workers 12 \
 --dataloader_prefetch_factor 2 \
@@ -362,11 +371,13 @@ LR: ~1e-5 (low)
 ### **Issue: High Loss / Not Learning**
 
 **Checks:**
+
 1. Loss should decrease within first epoch
 2. Grad norm should be 10-100
 3. Learning rate should climb during warmup
 
 **Fixes:**
+
 ```bash
 # Increase learning rate
 --learning_rate 1e-4
@@ -384,6 +395,7 @@ LR: ~1e-5 (low)
 **Error:** `Expected to have finished reduction...`
 
 **Fix:**
+
 ```bash
 accelerate launch \
   --mixed_precision=fp16 \
@@ -444,8 +456,8 @@ outputs = model(**inputs)
 # Post-process
 target_sizes = torch.tensor([image.size[::-1]])
 results = processor.post_process_object_detection(
-    outputs, 
-    target_sizes=target_sizes, 
+    outputs,
+    target_sizes=target_sizes,
     threshold=0.5
 )[0]
 
@@ -462,15 +474,15 @@ for score, label, box in zip(results["scores"], results["labels"], results["boxe
 
 ## Comparison: Deformable DETR vs Regular DETR
 
-| Metric | Regular DETR | Deformable DETR | Winner |
-|--------|--------------|-----------------|--------|
-| **Small object detection** | Struggles | Excellent | Deformable ✅ |
-| **Training speed** | 75-100 epochs | **30-50 epochs** | Deformable ✅ |
-| **Memory usage** | Higher | **Lower** | Deformable ✅ |
-| **Multi-scale detection** | Limited | **Multi-scale** | Deformable ✅ |
-| **Final mAP** | 0.82 | **0.87-0.90** | Deformable ✅ |
-| **Checkbox detection** | 65% recall | **85% recall** | Deformable ✅ |
-| **Maturity** | More established | Newer | Regular |
+| Metric                     | Regular DETR     | Deformable DETR  | Winner        |
+| -------------------------- | ---------------- | ---------------- | ------------- |
+| **Small object detection** | Struggles        | Excellent        | Deformable ✅ |
+| **Training speed**         | 75-100 epochs    | **30-50 epochs** | Deformable ✅ |
+| **Memory usage**           | Higher           | **Lower**        | Deformable ✅ |
+| **Multi-scale detection**  | Limited          | **Multi-scale**  | Deformable ✅ |
+| **Final mAP**              | 0.82             | **0.87-0.90**    | Deformable ✅ |
+| **Checkbox detection**     | 65% recall       | **85% recall**   | Deformable ✅ |
+| **Maturity**               | More established | Newer            | Regular       |
 
 **For CommonForms: Deformable DETR is the clear winner!** 🏆
 
@@ -480,35 +492,38 @@ for score, label, box in zip(results["scores"], results["labels"], results["boxe
 
 ### **H100 GPU (80GB) @ $2.50/hour**
 
-| Dataset Size | Training Time | Total Cost | mAP |
-|--------------|---------------|------------|-----|
-| **10K** (test) | 6 hours | **$15** | 0.75-0.80 |
-| **50K** | 18 hours | **$45** | 0.82-0.88 |
-| **450K** (full) | 60 hours | **$150** | 0.87-0.92 |
+| Dataset Size    | Training Time | Total Cost | mAP       |
+| --------------- | ------------- | ---------- | --------- |
+| **10K** (test)  | 6 hours       | **$15**    | 0.75-0.80 |
+| **50K**         | 18 hours      | **$45**    | 0.82-0.88 |
+| **450K** (full) | 60 hours      | **$150**   | 0.87-0.92 |
 
 ### **4x L40S (192GB) @ $8.30/hour**
 
-| Dataset Size | Training Time | Total Cost | mAP |
-|--------------|---------------|------------|-----|
-| **10K** (test) | 3 hours | **$25** | 0.75-0.80 |
-| **50K** | 8 hours | **$66** | 0.82-0.88 |
-| **450K** (full) | 30 hours | **$249** | 0.87-0.92 |
+| Dataset Size    | Training Time | Total Cost | mAP       |
+| --------------- | ------------- | ---------- | --------- |
+| **10K** (test)  | 3 hours       | **$25**    | 0.75-0.80 |
+| **50K**         | 8 hours       | **$66**    | 0.82-0.88 |
+| **450K** (full) | 30 hours      | **$249**   | 0.87-0.92 |
 
 ---
 
 ## Key Advantages for CommonForms
 
 1. **Pre-trained on Documents** (DocLayNet)
+
    - Already understands document structure
    - 80K training pages on layouts
    - Faster convergence than COCO-pretrained models
 
 2. **Deformable Attention**
+
    - Better for small checkboxes (10-30px)
    - Multi-scale feature detection
    - Handles varying field sizes (tiny checkbox to large signature box)
 
 3. **Faster Training**
+
    - 30 epochs vs 75-100 for regular DETR
    - Saves 50-60% training time and cost
    - Quicker iteration
@@ -532,6 +547,7 @@ for score, label, box in zip(results["scores"], results["labels"], results["boxe
 ## Quick Reference Commands
 
 ### **Test Run (5 minutes)**
+
 ```bash
 python run_deformable_detr_commonforms.py \
   --max_train_samples 10 \
@@ -540,6 +556,7 @@ python run_deformable_detr_commonforms.py \
 ```
 
 ### **Production Run (H100)**
+
 ```bash
 python run_deformable_detr_commonforms.py \
   --num_train_epochs 30 \
@@ -550,6 +567,7 @@ python run_deformable_detr_commonforms.py \
 ```
 
 ### **Production Run (4x L40S)**
+
 ```bash
 accelerate launch --num_processes=4 \
   run_deformable_detr_commonforms.py \
@@ -564,4 +582,3 @@ accelerate launch --num_processes=4 \
 ---
 
 **You're all set! This is the BEST model for CommonForms form field detection.** 🚀
-

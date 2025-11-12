@@ -222,27 +222,39 @@ def main():
     
     # Extract category information from dataset
     logger.info("Extracting category information...")
-    categories = set()
-    sample_count = 0
-    max_samples_for_categories = 1000
     
-    dataset_for_categories = train_dataset.take(max_samples_for_categories) if data_args.use_streaming else train_dataset
+    # Try to get category names from dataset features (like AutoTrain)
+    try:
+        # CommonForms has category names in the dataset schema
+        categories = train_dataset.features["objects"].feature["category"].names
+        id2label = dict(enumerate(categories))
+        label2id = {v: k for k, v in id2label.items()}
+        num_labels = len(categories)
+        logger.info(f"Found {num_labels} categories from dataset schema: {categories}")
+    except (AttributeError, KeyError):
+        # Fallback: scan data for unique category IDs
+        logger.info("Dataset schema doesn't have category names, scanning data...")
+        categories = set()
+        sample_count = 0
+        max_samples_for_categories = 1000
+        
+        dataset_for_categories = train_dataset.take(max_samples_for_categories) if data_args.use_streaming else train_dataset
+        
+        for example in dataset_for_categories:
+            if sample_count >= max_samples_for_categories:
+                break
+            if "objects" in example and "category_id" in example["objects"]:
+                categories.update(example["objects"]["category_id"])
+            sample_count += 1
+        
+        category_list = sorted(list(categories))
+        num_labels = len(category_list)
+        
+        # Create label mappings
+        id2label = {i: f"category_{cat}" for i, cat in enumerate(category_list)}
+        label2id = {v: k for k, v in id2label.items()}
+        logger.info(f"Found {num_labels} unique category IDs: {category_list}")
     
-    for example in dataset_for_categories:
-        if sample_count >= max_samples_for_categories:
-            break
-        if "objects" in example and "category_id" in example["objects"]:
-            categories.update(example["objects"]["category_id"])
-        sample_count += 1
-    
-    category_list = sorted(list(categories))
-    num_labels = len(category_list)
-    
-    # Create label mappings
-    id2label = {i: f"category_{cat}" for i, cat in enumerate(category_list)}
-    label2id = {v: k for k, v in id2label.items()}
-    
-    logger.info(f"Found {num_labels} categories: {category_list}")
     logger.info(f"Label mapping: {id2label}")
     
     # Load model and processor
