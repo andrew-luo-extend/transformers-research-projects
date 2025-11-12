@@ -227,6 +227,8 @@ def transform_aug_ann(examples, transform, image_processor, category_key, catego
             
             if isinstance(boxes, torch.Tensor):
                 device = boxes.device
+                boxes = torch.nan_to_num(boxes, nan=0.0, posinf=0.0, neginf=0.0)
+                boxes = boxes.to(torch.float32)
                 finite_mask = torch.isfinite(boxes).all(dim=1)
                 
                 if finite_mask.any():
@@ -238,14 +240,28 @@ def transform_aug_ann(examples, transform, image_processor, category_key, catego
                     if isinstance(class_labels, torch.Tensor):
                         class_labels = class_labels.new_empty(0)
                 
+                if class_labels is None:
+                    class_labels = torch.zeros((boxes.shape[0],), dtype=torch.int64, device=device)
+                elif not isinstance(class_labels, torch.Tensor):
+                    class_labels = torch.tensor(class_labels, dtype=torch.int64, device=device)
+                else:
+                    class_labels = class_labels.to(torch.int64)
+                
+                if class_labels.shape[0] != boxes.shape[0]:
+                    min_len = min(class_labels.shape[0], boxes.shape[0])
+                    boxes = boxes[:min_len]
+                    class_labels = class_labels[:min_len]
+                
                 # Ensure at least one valid annotation remains
                 if boxes.numel() == 0:
                     boxes = torch.tensor([[0.0, 0.0, 0.01, 0.01]], dtype=torch.float32, device=device)
                     if isinstance(class_labels, torch.Tensor):
-                        class_labels = torch.zeros(1, dtype=torch.int64, device=class_labels.device)
-                    else:
-                        class_labels = torch.tensor([0], dtype=torch.int64, device=device)
+                        class_labels = class_labels.new_zeros(1)
                 
+                if boxes.numel() > 0:
+                    boxes = boxes.clamp(0.0, 1.0)
+                    boxes[:, 2:] = boxes[:, 2:].clamp_min(1e-6)
+
                 label_copy["boxes"] = boxes
                 label_copy["class_labels"] = class_labels
             
@@ -459,6 +475,20 @@ def main():
     eval_dataset_transformed = eval_dataset.with_transform(transform_eval) if eval_dataset else None
     
     logger.info("Transforms applied!")
+
+    # Run a quick sanity check to surface NaNs/shape issues early
+    try:
+        debug_sample = train_dataset_transformed[0]
+        debug_labels = debug_sample.get("labels", [])
+        if isinstance(debug_labels, list) and len(debug_labels) > 0:
+            debug_boxes = debug_labels[0].get("boxes")
+            if isinstance(debug_boxes, torch.Tensor) and debug_boxes.ndim == 2 and debug_boxes.numel() > 0:
+                if torch.isnan(debug_boxes).any():
+                    logger.warning("Detected NaNs in first sample boxes after preprocessing. They will be clamped.")
+                if (debug_boxes[:, 2:] <= 0).any():
+                    logger.warning("Detected non-positive widths/heights in first sample boxes after preprocessing.")
+    except Exception as dbg_err:
+        logger.warning(f"Sanity check on transformed dataset failed: {dbg_err}")
     
     # Training arguments (consistent with AutoTrain)
     training_args_dict = {
