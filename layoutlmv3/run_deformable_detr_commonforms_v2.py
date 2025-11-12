@@ -14,6 +14,7 @@ import numpy as np
 import torch
 from PIL import Image
 import albumentations as A
+from typing import Any
 
 from datasets import load_dataset
 from transformers import (
@@ -115,6 +116,33 @@ def create_transforms(image_size, is_train=True):
         )
 
 
+def _to_plain_value(value: Any):
+    """Recursively convert BatchFeature/maps to plain Python containers."""
+    if isinstance(value, list):
+        return [_to_plain_value(v) for v in value]
+    if hasattr(value, "items"):
+        return {k: _to_plain_value(v) for k, v in value.items()}
+    return value
+
+
+def _squeeze_single_example(encoded: dict):
+    """Remove leading batch dimension for tensors and unwrap single-item containers."""
+    squeezed = {}
+    for key, value in encoded.items():
+        if isinstance(value, torch.Tensor) and value.dim() > 0 and value.shape[0] == 1:
+            squeezed[key] = value.squeeze(0)
+        elif isinstance(value, list):
+            if len(value) == 1:
+                # Keep lists for fields where a list is expected (e.g. labels already processed)
+                item = value[0]
+                squeezed[key] = item
+            else:
+                squeezed[key] = value
+        else:
+            squeezed[key] = value
+    return squeezed
+
+
 def transform_aug_ann(examples, transform, image_processor, category_key, category_id_remap):
     """Apply augmentation and format for DETR"""
     # The datasets library sometimes feeds single examples and sometimes batches.
@@ -192,21 +220,11 @@ def transform_aug_ann(examples, transform, image_processor, category_key, catego
         )
     
     encoded = image_processor(images=processed_images, annotations=processed_targets, return_tensors="pt")
+    encoded = {key: _to_plain_value(value) for key, value in encoded.items()}
     
     # When we processed a single example, remove the artificial batch dimension for tensors
     if len(processed_images) == 1:
-        new_encoded = {}
-        for key, value in encoded.items():
-            if isinstance(value, torch.Tensor):
-                new_encoded[key] = value[0]
-            elif isinstance(value, list) and len(value) == 1:
-                new_encoded[key] = value[0]
-            else:
-                new_encoded[key] = value
-        # Ensure labels are still a list of dicts for the Trainer
-        if isinstance(new_encoded.get("labels"), dict):
-            new_encoded["labels"] = [new_encoded["labels"]]
-        return new_encoded
+        encoded = _squeeze_single_example(encoded)
     
     return encoded
 
