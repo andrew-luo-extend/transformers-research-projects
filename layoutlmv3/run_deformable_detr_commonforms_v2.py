@@ -10,6 +10,7 @@ Highlights
 - Handles CommonForms' COCO-style bounding boxes without intermediate conversion.
 - Supports local and streaming dataset loading, subset selection, and Hugging Face Hub push.
 - Compatible with `accelerate launch` for multi-GPU distributed training.
+- Supports training with negative samples (images with no bounding boxes).
 
 Quick start (single GPU, RunPod defaults):
 
@@ -20,16 +21,19 @@ python run_deformable_detr_commonforms_v2.py \
   --per_device_eval_batch_size 8 \
   --num_train_epochs 30 \
   --learning_rate 5e-5 \
-  --fp16 \
   --use_runpod_defaults
 ```
 
 For multi-GPU:
 
 ```
-accelerate launch --mixed_precision=fp16 run_deformable_detr_commonforms_v2.py \
+accelerate launch run_deformable_detr_commonforms_v2.py \
   --do_train --do_eval --use_runpod_defaults --per_device_train_batch_size 6
 ```
+
+IMPORTANT: Do NOT use --fp16 or --bf16 with Deformable DETR. The Hungarian matcher's
+GIoU calculations will overflow in float16, causing "matrix contains invalid numeric
+entries" errors. Train in full float32 precision.
 """
 
 from __future__ import annotations
@@ -128,8 +132,8 @@ class DataArguments:
     filter_empty_annotations: bool = field(
         default=False,
         metadata={
-            "help": "Filter out samples with no bounding boxes. Set to True to remove negative samples. "
-            "When False, samples that cause errors will be caught and skipped during training."
+            "help": "Filter out samples with no bounding boxes at dataset level (before preprocessing). "
+            "Usually not needed as empty samples are handled during preprocessing."
         },
     )
 
@@ -856,8 +860,8 @@ def main() -> None:
         logger.warning("Evaluation requested but no eval split found. Skipping evaluation.")
         training_args.do_eval = False
 
-    # Optionally filter out empty annotations
-    # When disabled, the collator will filter them out at batch time
+    # Filter out empty annotations (required for Deformable DETR)
+    # The Hungarian matcher in Deformable DETR cannot handle samples with 0 targets
     if data_args.filter_empty_annotations:
         if train_dataset is not None and not data_args.use_streaming:
             logger.info("Filtering training dataset to remove samples without annotations...")
