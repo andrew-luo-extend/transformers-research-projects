@@ -382,7 +382,6 @@ def main():
             args.model_name_or_path,
             config=model_config,
             cache_dir=args.cache_dir,
-            num_labels=len(id2label),
             ignore_mismatched_sizes=True,
         )
     except OSError:
@@ -391,7 +390,6 @@ def main():
             args.model_name_or_path,
             config=model_config,
             cache_dir=args.cache_dir,
-            num_labels=len(id2label),
             ignore_mismatched_sizes=True,
             from_tf=True,
         )
