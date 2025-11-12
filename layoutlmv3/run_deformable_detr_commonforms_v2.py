@@ -563,26 +563,47 @@ def preprocess_examples(
 
         for bbox, category_id in zip(albumentations_inputs["bboxes"], albumentations_inputs["category_id"]):
             x, y, w, h = map(float, bbox)
+            # Strict validation: skip boxes with NaN/Inf
             if not np.isfinite([x, y, w, h]).all():
+                logger.debug(f"Skipping non-finite bbox in sample {image_id}: [{x}, {y}, {w}, {h}]")
                 continue
+            # Skip degenerate boxes (zero or negative area)
             if w <= 0 or h <= 0:
+                logger.debug(f"Skipping degenerate bbox in sample {image_id}: w={w}, h={h}")
                 continue
+            # Clip to image bounds
             x = float(np.clip(x, 0.0, max(img_w - 1.0, 1.0)))
             y = float(np.clip(y, 0.0, max(img_h - 1.0, 1.0)))
             w = float(np.clip(w, 1.0, max(img_w - x, 1.0)))
             h = float(np.clip(h, 1.0, max(img_h - y, 1.0)))
+            # Double-check after clipping
             if w <= 0 or h <= 0:
+                logger.debug(f"Skipping bbox with zero area after clipping in sample {image_id}")
+                continue
+            # Verify no extreme values that could cause overflow
+            if x > 1e6 or y > 1e6 or w > 1e6 or h > 1e6:
+                logger.warning(f"Skipping bbox with extreme values in sample {image_id}: [{x}, {y}, {w}, {h}]")
                 continue
             transformed_bboxes.append([x, y, w, h])
             transformed_categories.append(int(category_id))
 
+        # Handle samples that became empty after augmentation (all boxes filtered out)
+        # Treat them as negative samples instead of skipping
         if not transformed_bboxes or not transformed_categories:
-            logger.debug("Skipping sample %s after augmentation: no valid boxes.", image_id)
-            skip_reasons["no_valid_boxes_after_aug"] = skip_reasons.get("no_valid_boxes_after_aug", 0) + 1
-            continue
-        if not all(np.isfinite(bbox).all() for bbox in transformed_bboxes):
-            logger.debug("Skipping sample %s after augmentation: non-finite bbox detected.", image_id)
-            skip_reasons["non_finite_bbox"] = skip_reasons.get("non_finite_bbox", 0) + 1
+            logger.debug(f"Sample {image_id} became empty after augmentation, treating as negative sample")
+            if isinstance(image_id, (int, np.integer)):
+                target_image_id = int(image_id)
+            else:
+                try:
+                    target_image_id = int(str(image_id))
+                except (TypeError, ValueError):
+                    target_image_id = idx
+
+            processed_images.append(img_transformed.astype(np.uint8))
+            processed_targets.append({
+                "image_id": target_image_id,
+                "annotations": [],  # Empty annotations
+            })
             continue
 
         if isinstance(image_id, (int, np.integer)):
@@ -688,18 +709,42 @@ def preprocess_examples(
                 cleaned_labels.append(label)
                 continue
 
+            # Filter out boxes with non-finite values (NaN, Inf)
             finite_mask = torch.isfinite(boxes).all(dim=1)
             if finite_mask.any():
                 boxes = boxes[finite_mask]
                 class_labels = class_labels[finite_mask]
-            else:
-                logger.debug("Replacing non-finite boxes with default placeholder.")
-                boxes = torch.tensor([[0.5, 0.5, 1e-3, 1e-3]], dtype=torch.float32)
-                class_labels = torch.zeros((1,), dtype=torch.int64)
 
+            # After filtering, check if we have any valid boxes left
+            if boxes.numel() == 0:
+                # All boxes were non-finite, treat as empty sample
+                logger.debug("All boxes were non-finite after filtering, treating as empty sample")
+                label["boxes"] = torch.empty((0, 4), dtype=torch.float32)
+                label["class_labels"] = torch.empty((0,), dtype=torch.int64)
+                cleaned_labels.append(label)
+                continue
+
+            # Validate bbox format: image processor converts to normalized [cx, cy, w, h]
+            # Ensure all values are in valid range [0, 1] for normalized coordinates
             boxes = boxes.clamp(0.0, 1.0)
+
+            # Ensure width and height are not too small (avoid degenerate boxes)
             if boxes.shape[-1] >= 4:
-                boxes[:, 2:] = boxes[:, 2:].clamp(1e-4, 1.0 - 1e-4)
+                boxes[:, 2:] = boxes[:, 2:].clamp(1e-4, 1.0)
+
+            # Final check: remove any degenerate boxes (zero width or height)
+            valid_box_mask = (boxes[:, 2] > 1e-6) & (boxes[:, 3] > 1e-6)
+            if valid_box_mask.any():
+                boxes = boxes[valid_box_mask]
+                class_labels = class_labels[valid_box_mask]
+
+            # Check again after removing degenerate boxes
+            if boxes.numel() == 0:
+                logger.debug("All boxes were degenerate (zero area), treating as empty sample")
+                label["boxes"] = torch.empty((0, 4), dtype=torch.float32)
+                label["class_labels"] = torch.empty((0,), dtype=torch.int64)
+                cleaned_labels.append(label)
+                continue
 
             label["boxes"] = boxes
             label["class_labels"] = class_labels
@@ -972,9 +1017,47 @@ def main() -> None:
         logger.info("=" * 80)
         try:
             first_batch = next(iter(trainer.get_train_dataloader()))
+
+            # Check pixel_values for NaN/Inf
             pv = first_batch.get("pixel_values")
-            if isinstance(pv, torch.Tensor) and torch.isnan(pv).any():
-                raise ValueError("NaNs detected in first training batch pixel_values.")
+            if isinstance(pv, torch.Tensor):
+                if torch.isnan(pv).any():
+                    raise ValueError("NaNs detected in first training batch pixel_values.")
+                if torch.isinf(pv).any():
+                    raise ValueError("Infs detected in first training batch pixel_values.")
+
+            # Check labels for NaN/Inf in boxes
+            labels = first_batch.get("labels")
+            if labels is not None and isinstance(labels, list):
+                for idx, label in enumerate(labels):
+                    if isinstance(label, dict):
+                        boxes = label.get("boxes")
+                        class_labels = label.get("class_labels")
+
+                        if isinstance(boxes, torch.Tensor) and boxes.numel() > 0:
+                            if torch.isnan(boxes).any():
+                                raise ValueError(f"NaNs detected in boxes for sample {idx} of first batch")
+                            if torch.isinf(boxes).any():
+                                raise ValueError(f"Infs detected in boxes for sample {idx} of first batch")
+
+                            # Check for extreme values that could cause GIoU overflow
+                            if (boxes > 10.0).any():
+                                logger.warning(f"Extremely large box values detected in sample {idx}: max={boxes.max().item()}")
+                            if (boxes < -10.0).any():
+                                logger.warning(f"Extremely negative box values detected in sample {idx}: min={boxes.min().item()}")
+
+                            # Check for degenerate boxes (zero area in normalized coordinates)
+                            if boxes.shape[-1] >= 4:
+                                widths = boxes[:, 2]
+                                heights = boxes[:, 3]
+                                if (widths < 1e-6).any() or (heights < 1e-6).any():
+                                    logger.warning(f"Degenerate boxes (near-zero area) detected in sample {idx}")
+
+                        if isinstance(class_labels, torch.Tensor) and class_labels.numel() > 0:
+                            if (class_labels < 0).any():
+                                raise ValueError(f"Negative class labels detected in sample {idx} of first batch")
+
+            logger.info("Sanity check passed: first batch looks healthy")
         except StopIteration:
             logger.warning("Training dataloader yielded no batches during sanity check.")
         except Exception as exc:
