@@ -879,9 +879,27 @@ def main() -> None:
         logger.warning("Evaluation requested but no eval split found. Skipping evaluation.")
         training_args.do_eval = False
 
-    # Note: We keep all samples including empty ones. The custom collator will handle
-    # ensuring batches don't contain ONLY empty samples to avoid Hungarian matcher issues.
-    logger.info("Keeping all samples (including those with no annotations)")
+    # Filter out empty annotations to avoid Hungarian matcher issues
+    # The Hungarian matcher cannot handle samples with no boxes, even with dummy boxes
+    if data_args.filter_empty_annotations:
+        if train_dataset is not None and not data_args.use_streaming:
+            logger.info("Filtering training dataset to remove samples without annotations...")
+            original_size = len(train_dataset)
+            train_dataset = train_dataset.filter(filter_empty_annotations)
+            filtered_size = len(train_dataset)
+            logger.info(f"Filtered {original_size - filtered_size} empty samples from training set ({filtered_size} remaining)")
+
+            if filtered_size == 0:
+                raise ValueError("After filtering empty samples, no training samples remain. Your dataset may only contain empty annotations.")
+
+        if eval_dataset is not None and not data_args.use_streaming:
+            logger.info("Filtering evaluation dataset to remove samples without annotations...")
+            original_size = len(eval_dataset)
+            eval_dataset = eval_dataset.filter(filter_empty_annotations)
+            filtered_size = len(eval_dataset)
+            logger.info(f"Filtered {original_size - filtered_size} empty samples from evaluation set ({filtered_size} remaining)")
+    else:
+        logger.info("Keeping all samples (including those with no annotations)")
 
     if training_args.do_train and data_args.max_train_samples:
         train_dataset = limit_dataset(train_dataset, data_args.max_train_samples, data_args.use_streaming)
