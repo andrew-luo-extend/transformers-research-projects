@@ -125,24 +125,6 @@ def _to_plain_value(value: Any):
     return value
 
 
-def _squeeze_single_example(encoded: dict):
-    """Remove leading batch dimension for tensors and unwrap single-item containers."""
-    squeezed = {}
-    for key, value in encoded.items():
-        if isinstance(value, torch.Tensor) and value.dim() > 0 and value.shape[0] == 1:
-            squeezed[key] = value.squeeze(0)
-        elif isinstance(value, list):
-            if len(value) == 1:
-                # Keep lists for fields where a list is expected (e.g. labels already processed)
-                item = value[0]
-                squeezed[key] = item
-            else:
-                squeezed[key] = value
-        else:
-            squeezed[key] = value
-    return squeezed
-
-
 def transform_aug_ann(examples, transform, image_processor, category_key, category_id_remap):
     """Apply augmentation and format for DETR"""
     # The datasets library sometimes feeds single examples and sometimes batches.
@@ -221,10 +203,6 @@ def transform_aug_ann(examples, transform, image_processor, category_key, catego
     
     encoded = image_processor(images=processed_images, annotations=processed_targets, return_tensors="pt")
     encoded = {key: _to_plain_value(value) for key, value in encoded.items()}
-    
-    # When we processed a single example, remove the artificial batch dimension for tensors
-    if len(processed_images) == 1:
-        encoded = _squeeze_single_example(encoded)
     
     return encoded
 
