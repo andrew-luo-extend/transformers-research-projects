@@ -65,18 +65,22 @@ def get_args():
     return parser.parse_args()
 
 
-def formatted_anns(image_id, category, area, bbox):
+def formatted_anns(image_id, category_ids, bboxes):
     """Format annotations for DETR"""
     annotations = []
-    for i in range(len(category)):
-        new_ann = {
-            "image_id": image_id,
-            "category_id": category[i],
-            "isCrowd": 0,
-            "area": area[i],
-            "bbox": list(bbox[i]),
-        }
-        annotations.append(new_ann)
+    for category_id, box in zip(category_ids, bboxes):
+        x, y, w, h = map(float, box)
+        if w <= 0 or h <= 0:
+            continue
+        annotations.append(
+            {
+                "image_id": image_id,
+                "category_id": int(category_id),
+                "iscrowd": 0,
+                "area": float(w * h),
+                "bbox": [x, y, w, h],
+            }
+        )
     return annotations
 
 
@@ -95,7 +99,7 @@ def create_transforms(image_size, is_train=True):
             ],
             bbox_params=A.BboxParams(
                 format="coco",  # [x, y, width, height]
-                label_fields=["category"]
+                label_fields=["category_id"],
             ),
         )
     else:
@@ -106,50 +110,132 @@ def create_transforms(image_size, is_train=True):
             ],
             bbox_params=A.BboxParams(
                 format="coco",
-                label_fields=["category"]
+                label_fields=["category_id"],
             ),
         )
 
 
-def transform_aug_ann(examples, transform, image_processor):
+def transform_aug_ann(examples, transform, image_processor, category_key, category_id_remap):
     """Apply augmentation and format for DETR"""
-    image_ids = examples["id"]
-    images, bboxes, areas, categories = [], [], [], []
+    # The datasets library sometimes feeds single examples and sometimes batches.
+    # Normalize to lists so downstream code does not have to branch.
+    if isinstance(examples["image"], Image.Image):
+        image_ids = [examples["id"]]
+        images = [examples["image"]]
+        objects_list = [examples["objects"]]
+    else:
+        image_ids = examples["id"]
+        images = examples["image"]
+        objects_list = examples["objects"]
     
-    for image, objects in zip(examples["image"], examples["objects"]):
-        # Convert PIL to numpy
-        image = np.array(image.convert("RGB"))[:, :, ::-1]
+    processed_images = []
+    processed_targets = []
+    
+    for idx, (image_id, image, objects) in enumerate(zip(image_ids, images, objects_list)):
+        if isinstance(image, Image.Image):
+            image_rgb = image.convert("RGB")
+        else:
+            image_rgb = Image.fromarray(image).convert("RGB")
         
-        # Apply augmentation
-        out = transform(
-            image=image,
-            bboxes=objects["bbox"],
-            category=objects["category"]
+        image_np = np.array(image_rgb)
+        image_bgr = image_np[:, :, ::-1]
+        
+        raw_bboxes = objects.get("bbox", [])
+        raw_categories = objects.get(category_key) or objects.get("category_id") or objects.get("category") or []
+        
+        # Keep lengths aligned
+        if len(raw_bboxes) != len(raw_categories):
+            min_len = min(len(raw_bboxes), len(raw_categories))
+            raw_bboxes = raw_bboxes[:min_len]
+            raw_categories = raw_categories[:min_len]
+        
+        normalized_categories = []
+        for cat in raw_categories:
+            if isinstance(cat, np.generic):
+                cat = cat.item()
+            normalized_categories.append(cat)
+        
+        mapped_categories = [category_id_remap.get(cat, 0) for cat in normalized_categories]
+        
+        transform_out = transform(
+            image=image_bgr,
+            bboxes=raw_bboxes,
+            category_id=mapped_categories,
         )
         
-        areas.append(objects["area"])
-        images.append(out["image"])
-        bboxes.append(out["bboxes"])
-        categories.append(out["category"])
+        transformed_bboxes = []
+        transformed_categories = []
+        for bbox, category_id in zip(transform_out["bboxes"], transform_out["category_id"]):
+            x, y, w, h = bbox
+            if w <= 0 or h <= 0:
+                continue
+            transformed_bboxes.append([float(x), float(y), float(w), float(h)])
+            transformed_categories.append(int(category_id))
+        
+        if len(transformed_bboxes) == 0:
+            transformed_bboxes = [[0.0, 0.0, 1.0, 1.0]]
+            default_label = int(mapped_categories[0]) if mapped_categories else 0
+            transformed_categories = [default_label]
+        
+        processed_images.append(transform_out["image"][:, :, ::-1].astype(np.uint8))
+        
+        if isinstance(image_id, (int, np.integer)):
+            target_image_id = int(image_id)
+        else:
+            try:
+                target_image_id = int(str(image_id))
+            except (TypeError, ValueError):
+                target_image_id = idx
+        
+        processed_targets.append(
+            {"image_id": target_image_id, "annotations": formatted_anns(target_image_id, transformed_categories, transformed_bboxes)}
+        )
     
-    # Format annotations
-    targets = [
-        {"image_id": id_, "annotations": formatted_anns(id_, cat_, ar_, box_)}
-        for id_, cat_, ar_, box_ in zip(image_ids, categories, areas, bboxes)
-    ]
+    encoded = image_processor(images=processed_images, annotations=processed_targets, return_tensors="pt")
     
-    # Process with image processor
-    return image_processor(images=images, annotations=targets, return_tensors="pt")
+    # When we processed a single example, remove the artificial batch dimension for tensors
+    if len(processed_images) == 1:
+        new_encoded = {}
+        for key, value in encoded.items():
+            if isinstance(value, torch.Tensor):
+                new_encoded[key] = value[0]
+            elif isinstance(value, list) and len(value) == 1:
+                new_encoded[key] = value[0]
+            else:
+                new_encoded[key] = value
+        # Ensure labels are still a list of dicts for the Trainer
+        if isinstance(new_encoded.get("labels"), dict):
+            new_encoded["labels"] = [new_encoded["labels"]]
+        return new_encoded
+    
+    return encoded
 
 
 def collate_fn(batch):
     """Custom collate function for DETR"""
-    pixel_values = [item["pixel_values"] for item in batch]
-    encoding = {}
-    encoding["pixel_values"] = torch.stack(pixel_values)
-    encoding["pixel_mask"] = torch.stack([item["pixel_mask"] for item in batch])
-    encoding["labels"] = [item["labels"] for item in batch]
-    return encoding
+    pixel_values = []
+    for item in batch:
+        pv = item["pixel_values"]
+        if isinstance(pv, torch.Tensor) and pv.dim() > 3 and pv.shape[0] == 1:
+            pv = pv.squeeze(0)
+        pixel_values.append(pv)
+    pixel_masks = None
+    if "pixel_mask" in batch[0]:
+        pixel_masks = []
+        for item in batch:
+            pm = item["pixel_mask"]
+            if isinstance(pm, torch.Tensor) and pm.dim() > 3 and pm.shape[0] == 1:
+                pm = pm.squeeze(0)
+            pixel_masks.append(pm)
+    
+    batch_dict = {
+        "pixel_values": torch.stack(pixel_values),
+        "labels": [item["labels"] for item in batch],
+    }
+    if pixel_masks is not None:
+        batch_dict["pixel_mask"] = torch.stack(pixel_masks)
+    
+    return batch_dict
 
 
 def main():
@@ -191,30 +277,85 @@ def main():
         logger.info(f"Limiting eval to {args.max_eval_samples} samples")
         eval_dataset = eval_dataset.select(range(min(args.max_eval_samples, len(eval_dataset))))
     
-    # Get category names from dataset schema
+    # Determine category field and build label mappings
     logger.info("Extracting categories...")
-    try:
-        # Try AutoTrain way first
-        categories = train_dataset.features["objects"].feature["category"].names
-    except AttributeError:
-        # CommonForms has a different structure
-        try:
-            categories = train_dataset.features["objects"]["category"].names
-        except:
-            # Fallback: extract from data
-            logger.warning("Could not extract categories from schema, sampling data...")
-            sample_cats = set()
-            for i, example in enumerate(train_dataset):
-                if i >= 100:
+    objects_feature = train_dataset.features.get("objects")
+    category_feature = None
+    category_key = None
+    
+    if objects_feature is not None:
+        inner_feature = getattr(objects_feature, "feature", None)
+        if inner_feature:
+            for candidate in ("category_id", "category", "label", "class"):
+                if candidate in inner_feature:
+                    category_key = candidate
+                    category_feature = inner_feature[candidate]
                     break
-                sample_cats.update(example["objects"]["category"])
-            categories = [f"class_{i}" for i in sorted(list(sample_cats))]
     
-    id2label = dict(enumerate(categories))
+    if category_key is None:
+        sample_example = train_dataset[0]
+        if "objects" in sample_example:
+            for candidate in ("category_id", "category", "label", "class"):
+                if candidate in sample_example["objects"]:
+                    category_key = candidate
+                    break
+    
+    if category_key is None:
+        raise ValueError("Could not determine category field in dataset. Expected one of ['category_id', 'category', 'label', 'class'].")
+    
+    logger.info(f"Using '{category_key}' as category field")
+    
+    # Collect unique category values (limit scanning for speed)
+    unique_categories = set()
+    max_scan = min(len(train_dataset), 2000)
+    for idx in range(max_scan):
+        example = train_dataset[idx]
+        cats = example.get("objects", {}).get(category_key, [])
+        for cat in cats:
+            if isinstance(cat, np.generic):
+                cat = cat.item()
+            unique_categories.add(cat)
+        if (
+            len(unique_categories) > 0
+            and category_feature is not None
+            and hasattr(category_feature, "num_classes")
+            and len(unique_categories) >= category_feature.num_classes
+        ):
+            break
+    
+    if not unique_categories:
+        logger.warning("No categories found while scanning data; defaulting to single class.")
+        unique_categories = {0}
+    
+    def sort_key(value):
+        return (str(type(value)), str(value))
+    
+    sorted_unique = sorted(unique_categories, key=sort_key)
+    
+    # Build mapping from original category value to contiguous IDs
+    category_id_remap = {orig: idx for idx, orig in enumerate(sorted_unique)}
+    
+    id2label = {}
+    for new_id, orig_value in enumerate(sorted_unique):
+        label_name = None
+        if category_feature is not None and hasattr(category_feature, "names"):
+            try:
+                label_name = category_feature.names[int(orig_value)]
+            except (TypeError, ValueError, KeyError, IndexError):
+                label_name = None
+        if label_name is None:
+            label_name = str(orig_value)
+        id2label[new_id] = label_name
+    
     label2id = {v: k for k, v in id2label.items()}
-    logger.info(f"Found {len(categories)} categories: {categories}")
     
+    logger.info(f"Found {len(id2label)} categories: {list(id2label.values())}")
     logger.info(f"Label mapping: {id2label}")
+    if len(category_id_remap) <= 20:
+        logger.info(f"Category remap (dataset -> model indices): {category_id_remap}")
+    else:
+        preview_items = list(category_id_remap.items())[:10]
+        logger.info(f"Category remap sample (dataset -> model indices): {preview_items} ...")
     
     # Load image processor (same as AutoTrain)
     logger.info(f"Loading image processor from {args.model_name_or_path}")
@@ -234,12 +375,14 @@ def main():
         id2label=id2label,
         cache_dir=args.cache_dir,
     )
+    model_config.num_labels = len(id2label)
     
     try:
         model = AutoModelForObjectDetection.from_pretrained(
             args.model_name_or_path,
             config=model_config,
             cache_dir=args.cache_dir,
+            num_labels=len(id2label),
             ignore_mismatched_sizes=True,
         )
     except OSError:
@@ -248,6 +391,7 @@ def main():
             args.model_name_or_path,
             config=model_config,
             cache_dir=args.cache_dir,
+            num_labels=len(id2label),
             ignore_mismatched_sizes=True,
             from_tf=True,
         )
@@ -262,10 +406,10 @@ def main():
     logger.info("Applying transforms...")
     
     def transform_train(examples):
-        return transform_aug_ann(examples, train_transform, image_processor)
+        return transform_aug_ann(examples, train_transform, image_processor, category_key, category_id_remap)
     
     def transform_eval(examples):
-        return transform_aug_ann(examples, eval_transform, image_processor)
+        return transform_aug_ann(examples, eval_transform, image_processor, category_key, category_id_remap)
     
     # Use with_transform for lazy loading (better for large datasets)
     train_dataset_transformed = train_dataset.with_transform(transform_train)
@@ -318,6 +462,7 @@ def main():
     
     # Initialize trainer
     logger.info("Initializing Trainer...")
+    
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -363,4 +508,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
