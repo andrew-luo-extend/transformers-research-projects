@@ -37,7 +37,8 @@ entries" errors. Train in full float32 precision.
 
 This script includes defensive safeguards:
 - Comprehensive bbox validation (NaN/Inf/degenerate boxes are filtered)
-- Safe Hungarian matcher (monkey-patches scipy to handle any NaN/Inf gracefully)
+- Smart matcher wrapper (skips Hungarian algorithm for samples with zero targets)
+- Safe Hungarian fallback (monkey-patches scipy to handle any NaN/Inf gracefully)
 - Early warning system (sanity check validates first batch before training)
 """
 
@@ -120,6 +121,125 @@ scipy.optimize.linear_sum_assignment = safe_linear_sum_assignment
 
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Matcher wrapper to skip Hungarian matching for samples with zero targets
+# ============================================================================
+
+def create_safe_matcher_wrapper(original_matcher):
+    """Wraps a DETR matcher to gracefully handle empty target samples.
+
+    When a sample has no ground-truth boxes (negative sample), the Hungarian
+    algorithm is skipped entirely and empty indices are returned.
+
+    Args:
+        original_matcher: The original HungarianMatcher from the model
+
+    Returns:
+        A wrapped matcher that handles empty samples
+    """
+    class SafeMatcherWrapper:
+        def __init__(self, matcher):
+            self.matcher = matcher
+            # Copy all attributes from original matcher
+            for attr in dir(matcher):
+                if not attr.startswith('_') and attr != 'forward':
+                    try:
+                        setattr(self, attr, getattr(matcher, attr))
+                    except:
+                        pass
+
+        def __call__(self, outputs, targets):
+            """Perform matching, skipping Hungarian for samples with no targets.
+
+            Args:
+                outputs: Model predictions
+                targets: List of target dicts with 'boxes' and 'class_labels'
+
+            Returns:
+                List of (src_idx, tgt_idx) tuples for each sample in batch
+            """
+            # Check if all targets are empty
+            all_empty = all(
+                (target.get("boxes") is None or
+                 (isinstance(target["boxes"], torch.Tensor) and target["boxes"].numel() == 0))
+                for target in targets
+            )
+
+            if all_empty:
+                # All samples have no targets - return empty indices for each
+                batch_size = len(targets)
+                device = outputs["pred_logits"].device
+                return [
+                    (torch.tensor([], dtype=torch.int64, device=device),
+                     torch.tensor([], dtype=torch.int64, device=device))
+                    for _ in range(batch_size)
+                ]
+
+            # Check each target individually
+            has_empty = any(
+                (target.get("boxes") is None or
+                 (isinstance(target["boxes"], torch.Tensor) and target["boxes"].numel() == 0))
+                for target in targets
+            )
+
+            if has_empty:
+                # Mixed batch: some empty, some non-empty
+                # Process each sample individually
+                results = []
+                device = outputs["pred_logits"].device
+
+                for i, target in enumerate(targets):
+                    boxes = target.get("boxes")
+                    is_empty = (boxes is None or
+                               (isinstance(boxes, torch.Tensor) and boxes.numel() == 0))
+
+                    if is_empty:
+                        # Empty target - return empty indices
+                        results.append((
+                            torch.tensor([], dtype=torch.int64, device=device),
+                            torch.tensor([], dtype=torch.int64, device=device)
+                        ))
+                    else:
+                        # Non-empty target - run matcher on single sample
+                        single_output = {
+                            "pred_logits": outputs["pred_logits"][i:i+1],
+                            "pred_boxes": outputs["pred_boxes"][i:i+1]
+                        }
+                        single_target = [target]
+
+                        try:
+                            single_result = self.matcher(single_output, single_target)
+                            results.append(single_result[0])
+                        except Exception as e:
+                            logger.warning(f"Matcher failed for sample {i}: {e}, treating as empty")
+                            results.append((
+                                torch.tensor([], dtype=torch.int64, device=device),
+                                torch.tensor([], dtype=torch.int64, device=device)
+                            ))
+
+                return results
+
+            # All targets non-empty - use original matcher
+            try:
+                return self.matcher(outputs, targets)
+            except Exception as e:
+                logger.error(f"Hungarian matcher failed: {e}")
+                # Fallback: return empty indices for all samples
+                batch_size = len(targets)
+                device = outputs["pred_logits"].device
+                return [
+                    (torch.tensor([], dtype=torch.int64, device=device),
+                     torch.tensor([], dtype=torch.int64, device=device))
+                    for _ in range(batch_size)
+                ]
+
+        def forward(self, outputs, targets):
+            """Forward method for compatibility."""
+            return self.__call__(outputs, targets)
+
+    return SafeMatcherWrapper(original_matcher)
 
 CANDIDATE_CATEGORY_KEYS: Tuple[str, ...] = ("category_id", "category", "label", "class", "id")
 
@@ -1043,6 +1163,16 @@ def main() -> None:
         ignore_mismatched_sizes=True,
     )
     logger.info("Model loaded with %d detection classes.", model.config.num_labels)
+
+    # Wrap the matcher to handle empty targets gracefully
+    if hasattr(model, 'model') and hasattr(model.model, 'criterion'):
+        criterion = model.model.criterion
+        if hasattr(criterion, 'matcher'):
+            logger.info("Wrapping matcher to handle empty targets (negative samples)")
+            criterion.matcher = create_safe_matcher_wrapper(criterion.matcher)
+            logger.info("Matcher wrapped successfully")
+    else:
+        logger.warning("Could not find matcher in model structure - matcher wrapping skipped")
 
     train_transform = create_transforms(data_args.image_size, is_train=True)
     eval_transform = create_transforms(data_args.image_size, is_train=False)
