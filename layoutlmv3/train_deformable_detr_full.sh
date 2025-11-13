@@ -24,6 +24,10 @@ fi
 
 export TOKENIZERS_PARALLELISM=false
 
+# Kill any existing TensorBoard on port 6006
+echo "Checking for existing TensorBoard process on port 6006..."
+lsof -ti:6006 | xargs kill -9 2>/dev/null && echo "Killed existing TensorBoard" || echo "No existing TensorBoard found"
+
 # Start TensorBoard in background
 TENSORBOARD_LOG_DIR="${OUTPUT_DIR}/logs"
 if command -v tensorboard &> /dev/null; then
