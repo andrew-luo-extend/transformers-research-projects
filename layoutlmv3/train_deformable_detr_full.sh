@@ -49,7 +49,7 @@ exec "${PYTHON_BIN}" "${DIR}/run_deformable_detr_commonforms_v2.py" \
   --gradient_accumulation_steps "${GRADIENT_ACCUMULATION_STEPS:-1}" \
   --learning_rate "${LEARNING_RATE:-5e-5}" \
   --weight_decay "${WEIGHT_DECAY:-1e-4}" \
-  --warmup_ratio "${WARMUP_RATIO:-0.02}" \
+  --warmup_ratio "${WARMUP_RATIO:-0.1}" \
   --max_grad_norm "${MAX_GRAD_NORM:-1.0}" \
   --logging_steps "${LOGGING_STEPS:-50}" \
   --save_strategy "${SAVE_STRATEGY:-epoch}" \
