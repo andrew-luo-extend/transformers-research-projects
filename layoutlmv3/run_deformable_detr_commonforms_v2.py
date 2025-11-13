@@ -62,21 +62,13 @@ import torch
 from PIL import Image
 from datasets import Dataset, IterableDataset, load_dataset
 
-from transformers import (
-    AutoConfig,
-    AutoImageProcessor,
-    AutoModelForObjectDetection,
-    HfArgumentParser,
-    Trainer,
-    TrainingArguments,
-    set_seed,
-)
-
 # ============================================================================
-# Monkey-patch scipy.optimize.linear_sum_assignment to handle NaN/Inf gracefully
+# Monkey-patch scipy.optimize.linear_sum_assignment BEFORE transformers import
 # ============================================================================
 # This defensive guard prevents "matrix contains invalid numeric entries" errors
 # in the Hungarian matcher by replacing NaN/Inf with large finite costs.
+# CRITICAL: This must happen BEFORE importing transformers, otherwise transformers
+# will have already imported the original function and our patch won't work!
 # Based on the fix from RF-DETR: https://github.com/Westlake-AI/SSCMA/issues/82
 
 _original_linear_sum_assignment = scipy.optimize.linear_sum_assignment
@@ -92,6 +84,9 @@ def safe_linear_sum_assignment(cost_matrix, *args, **kwargs):
     This prevents ValueError: "matrix contains invalid numeric entries"
     while still allowing the matcher to function correctly.
     """
+    # Convert to numpy array if it's a tensor
+    if hasattr(cost_matrix, 'cpu'):
+        cost_matrix = cost_matrix.cpu().numpy()
     cost_matrix = np.asarray(cost_matrix, dtype=np.float64)
 
     # Detect invalid entries (NaN or Inf)
