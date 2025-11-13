@@ -58,8 +58,6 @@ exec "${PYTHON_BIN}" "${DIR}/run_deformable_detr_commonforms_v2.py" \
   --load_best_model_at_end \
   --metric_for_best_model "${METRIC_FOR_BEST_MODEL:-eval_loss}" \
   --greater_is_better false \
-  --early_stopping_patience "${EARLY_STOPPING_PATIENCE:-5}" \
-  --early_stopping_threshold "${EARLY_STOPPING_THRESHOLD:-0.01}" \
   --dataloader_num_workers "${DATALOADER_NUM_WORKERS:-8}" \
   --report_to "${REPORT_TO:-tensorboard}" \
   --seed "${SEED:-42}" \

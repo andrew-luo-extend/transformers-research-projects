@@ -123,6 +123,7 @@ from transformers import (
     AutoConfig,
     AutoImageProcessor,
     AutoModelForObjectDetection,
+    EarlyStoppingCallback,
     HfArgumentParser,
     Trainer,
     TrainingArguments,
@@ -1367,6 +1368,13 @@ def main() -> None:
     if training_args.do_eval and eval_dataset is not None:
         eval_dataset = eval_dataset.with_transform(transform_eval)
 
+    # Initialize early stopping callback
+    # Stops training if eval_loss doesn't improve by at least 0.01 for 5 consecutive evaluations
+    early_stopping_callback = EarlyStoppingCallback(
+        early_stopping_patience=5,
+        early_stopping_threshold=0.01,
+    )
+
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -1374,6 +1382,7 @@ def main() -> None:
         eval_dataset=eval_dataset if training_args.do_eval else None,
         data_collator=collate_fn,
         tokenizer=image_processor,
+        callbacks=[early_stopping_callback],
     )
 
     if training_args.do_train:
