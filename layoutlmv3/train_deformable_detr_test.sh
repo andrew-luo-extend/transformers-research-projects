@@ -29,12 +29,12 @@ exec "${PYTHON_BIN}" "${DIR}/run_deformable_detr_commonforms_v2.py" \
   --dataset_name jbarrow/CommonForms \
   --output_dir "${OUTPUT_DIR}" \
   --cache_dir "${CACHE_DIR}" \
-  --max_train_samples "${MAX_TRAIN_SAMPLES:-128}" \
-  --max_eval_samples "${MAX_EVAL_SAMPLES:-64}" \
-  --num_train_epochs "${NUM_TRAIN_EPOCHS:-2}" \
+  --max_train_samples "${MAX_TRAIN_SAMPLES:-64}" \
+  --max_eval_samples "${MAX_EVAL_SAMPLES:-32}" \
+  --num_train_epochs "${NUM_TRAIN_EPOCHS:-1}" \
   --per_device_train_batch_size "${PER_DEVICE_TRAIN_BATCH_SIZE:-2}" \
   --per_device_eval_batch_size "${PER_DEVICE_EVAL_BATCH_SIZE:-2}" \
-  --learning_rate "${LEARNING_RATE:-5e-5}" \
+  --learning_rate "${LEARNING_RATE:-1e-5}" \
   --warmup_ratio "${WARMUP_RATIO:-0.1}" \
   --weight_decay "${WEIGHT_DECAY:-1e-4}" \
   --max_grad_norm "${MAX_GRAD_NORM:-1.0}" \
@@ -42,7 +42,6 @@ exec "${PYTHON_BIN}" "${DIR}/run_deformable_detr_commonforms_v2.py" \
   --save_strategy "no" \
   --eval_strategy "no" \
   --seed "${SEED:-42}" \
-  --fp16 \
   --do_train \
   --do_eval \
   --push_to_hub \
