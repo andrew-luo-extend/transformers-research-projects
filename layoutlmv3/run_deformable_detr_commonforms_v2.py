@@ -10,7 +10,7 @@ Highlights
 - Handles CommonForms' COCO-style bounding boxes without intermediate conversion.
 - Supports local and streaming dataset loading, subset selection, and Hugging Face Hub push.
 - Compatible with `accelerate launch` for multi-GPU distributed training.
-- Supports training with negative samples (images with no bounding boxes).
+- Strict bbox validation (filters out invalid/empty samples by default).
 
 Quick start (single GPU, RunPod defaults):
 
@@ -36,10 +36,14 @@ GIoU calculations will overflow in float16, causing "matrix contains invalid num
 entries" errors. Train in full float32 precision.
 
 This script includes defensive safeguards:
-- Comprehensive bbox validation (NaN/Inf/degenerate boxes are filtered)
+- Strict dataset filtering (requires all samples to have valid bboxes: finite, positive dimensions)
+- Comprehensive bbox validation (NaN/Inf/degenerate boxes filtered during preprocessing)
 - Smart matcher wrapper (skips Hungarian algorithm for samples with zero targets)
 - Safe Hungarian fallback (monkey-patches scipy to handle any NaN/Inf gracefully)
-- Early warning system (sanity check validates first batch before training)
+- Strict sanity check (asserts all first-batch samples have boxes, fails fast if not)
+
+By default (filter_empty_annotations=True), only samples with valid bboxes are kept for training.
+To train with negative samples (empty annotations), set --filter_empty_annotations=False.
 """
 
 from __future__ import annotations
@@ -307,10 +311,11 @@ class DataArguments:
         metadata={"help": "Target longest edge (pixels) after augmentation."},
     )
     filter_empty_annotations: bool = field(
-        default=False,
+        default=True,
         metadata={
-            "help": "Filter out samples with no bounding boxes at dataset level (before preprocessing). "
-            "Usually not needed as empty samples are handled during preprocessing."
+            "help": "Filter out samples with invalid or no bounding boxes at dataset level. "
+            "Ensures all training samples have at least one valid bbox (finite, positive dimensions). "
+            "Set to False to keep all samples (including empty ones) for negative sample training."
         },
     )
 
@@ -1019,6 +1024,67 @@ def filter_empty_annotations(example: Dict[str, Any]) -> bool:
     return False
 
 
+def filter_valid_bboxes(example: Dict[str, Any]) -> bool:
+    """Strict filter: only keep samples with at least one valid bbox.
+
+    A valid bbox must:
+    - Exist (len > 0)
+    - Have finite values (no NaN/Inf)
+    - Have positive dimensions (w > 0, h > 0)
+    - Have non-negative coordinates (x >= 0, y >= 0)
+    """
+    objects = example.get("objects")
+    if objects is None:
+        return False
+
+    # Get bboxes and categories
+    bboxes = objects.get("bbox") or objects.get("boxes") or []
+    if not bboxes or len(bboxes) == 0:
+        return False
+
+    # Get categories using candidate keys
+    categories = None
+    for key in CANDIDATE_CATEGORY_KEYS:
+        categories = objects.get(key)
+        if categories and len(categories) > 0:
+            break
+
+    if not categories or len(categories) == 0:
+        return False
+
+    if len(bboxes) != len(categories):
+        return False
+
+    # Check each bbox for validity
+    has_valid_bbox = False
+    for bbox in bboxes:
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            continue
+
+        x, y, w, h = bbox
+
+        # Check for finite values
+        try:
+            if not all(np.isfinite([x, y, w, h])):
+                continue
+        except (TypeError, ValueError):
+            continue
+
+        # Check COCO format requirements
+        if x < 0 or y < 0 or w <= 0 or h <= 0:
+            continue
+
+        # Check for extreme values that could cause overflow
+        if x > 1e6 or y > 1e6 or w > 1e6 or h > 1e6:
+            continue
+
+        # At least one valid bbox found
+        has_valid_bbox = True
+        break
+
+    return has_valid_bbox
+
+
 def main() -> None:
     parser = HfArgumentParser((ModelArguments, DataArguments, RunPodArguments, TrainingArguments))
 
@@ -1082,27 +1148,35 @@ def main() -> None:
         logger.warning("Evaluation requested but no eval split found. Skipping evaluation.")
         training_args.do_eval = False
 
-    # Filter out empty annotations (required for Deformable DETR)
-    # The Hungarian matcher in Deformable DETR cannot handle samples with 0 targets
+    # Filter datasets to ensure all samples have valid bboxes
     if data_args.filter_empty_annotations:
         if train_dataset is not None and not data_args.use_streaming:
-            logger.info("Filtering training dataset to remove samples without annotations...")
+            logger.info("Filtering training dataset - requiring valid bboxes (finite, positive dimensions)...")
             original_size = len(train_dataset)
-            train_dataset = train_dataset.filter(filter_empty_annotations)
+            train_dataset = train_dataset.filter(filter_valid_bboxes)
             filtered_size = len(train_dataset)
-            logger.info(f"Filtered {original_size - filtered_size} empty samples from training set ({filtered_size} remaining)")
+            logger.info(f"Filtered {original_size - filtered_size} invalid/empty samples from training set")
+            logger.info(f"Training set: {filtered_size} samples with valid bboxes")
 
             if filtered_size == 0:
-                raise ValueError("After filtering empty samples, no training samples remain. Your dataset may only contain empty annotations.")
+                raise ValueError(
+                    "After filtering, no training samples remain with valid bboxes. "
+                    "Check your dataset for:\n"
+                    "  - Samples with at least one bbox\n"
+                    "  - Bboxes with finite values (no NaN/Inf)\n"
+                    "  - Bboxes with positive dimensions (w > 0, h > 0)\n"
+                    "  - Bboxes with non-negative coordinates (x >= 0, y >= 0)"
+                )
 
         if eval_dataset is not None and not data_args.use_streaming:
-            logger.info("Filtering evaluation dataset to remove samples without annotations...")
+            logger.info("Filtering evaluation dataset - requiring valid bboxes...")
             original_size = len(eval_dataset)
-            eval_dataset = eval_dataset.filter(filter_empty_annotations)
+            eval_dataset = eval_dataset.filter(filter_valid_bboxes)
             filtered_size = len(eval_dataset)
-            logger.info(f"Filtered {original_size - filtered_size} empty samples from evaluation set ({filtered_size} remaining)")
+            logger.info(f"Filtered {original_size - filtered_size} invalid/empty samples from evaluation set")
+            logger.info(f"Evaluation set: {filtered_size} samples with valid bboxes")
     else:
-        logger.info("Keeping all samples (including those with no annotations)")
+        logger.info("Keeping all samples (including empty/invalid ones) - ensure matcher can handle this!")
 
     if training_args.do_train and data_args.max_train_samples:
         train_dataset = limit_dataset(train_dataset, data_args.max_train_samples, data_args.use_streaming)
@@ -1216,12 +1290,32 @@ def main() -> None:
             # Check labels for NaN/Inf in boxes
             labels = first_batch.get("labels")
             if labels is not None and isinstance(labels, list):
+                batch_bbox_counts = []
                 for idx, label in enumerate(labels):
                     if isinstance(label, dict):
                         boxes = label.get("boxes")
                         class_labels = label.get("class_labels")
 
-                        if isinstance(boxes, torch.Tensor) and boxes.numel() > 0:
+                        # STRICT REQUIREMENT: All samples must have at least one bbox
+                        if boxes is None or (isinstance(boxes, torch.Tensor) and boxes.numel() == 0):
+                            raise ValueError(
+                                f"Sample {idx} in first batch has NO bounding boxes! "
+                                f"If filter_empty_annotations=True, this should not happen. "
+                                f"Check your filtering logic."
+                            )
+
+                        if isinstance(boxes, torch.Tensor):
+                            num_boxes = boxes.shape[0]
+                            batch_bbox_counts.append(num_boxes)
+                            logger.info(f"  Sample {idx}: {num_boxes} boxes")
+
+                            if num_boxes == 0:
+                                raise ValueError(
+                                    f"Sample {idx} has 0 boxes after preprocessing! "
+                                    f"Dataset filtering should have removed this sample."
+                                )
+
+                            # Check for NaN/Inf
                             if torch.isnan(boxes).any():
                                 raise ValueError(f"NaNs detected in boxes for sample {idx} of first batch")
                             if torch.isinf(boxes).any():
@@ -1240,11 +1334,19 @@ def main() -> None:
                                 if (widths < 1e-6).any() or (heights < 1e-6).any():
                                     logger.warning(f"Degenerate boxes (near-zero area) detected in sample {idx}")
 
-                        if isinstance(class_labels, torch.Tensor) and class_labels.numel() > 0:
+                        if isinstance(class_labels, torch.Tensor):
+                            if class_labels.numel() == 0:
+                                raise ValueError(f"Sample {idx} has 0 class labels!")
                             if (class_labels < 0).any():
                                 raise ValueError(f"Negative class labels detected in sample {idx} of first batch")
 
-            logger.info("Sanity check passed: first batch looks healthy")
+                # Summary
+                if batch_bbox_counts:
+                    logger.info(f"First batch summary: {len(batch_bbox_counts)} samples, "
+                              f"bbox counts: min={min(batch_bbox_counts)}, max={max(batch_bbox_counts)}, "
+                              f"avg={sum(batch_bbox_counts)/len(batch_bbox_counts):.1f}")
+
+            logger.info("✓ Sanity check passed: all samples have valid bboxes")
         except StopIteration:
             logger.warning("Training dataloader yielded no batches during sanity check.")
         except Exception as exc:
