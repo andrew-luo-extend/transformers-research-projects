@@ -43,7 +43,7 @@ exec "${PYTHON_BIN}" "${DIR}/run_deformable_detr_commonforms_v2.py" \
   --dataset_name jbarrow/CommonForms \
   --output_dir "${OUTPUT_DIR}" \
   --cache_dir "${CACHE_DIR}" \
-  --num_train_epochs "${NUM_TRAIN_EPOCHS:-30}" \
+  --num_train_epochs "${NUM_TRAIN_EPOCHS:-15}" \
   --per_device_train_batch_size "${PER_DEVICE_TRAIN_BATCH_SIZE:-8}" \
   --per_device_eval_batch_size "${PER_DEVICE_EVAL_BATCH_SIZE:-8}" \
   --gradient_accumulation_steps "${GRADIENT_ACCUMULATION_STEPS:-1}" \
@@ -57,6 +57,9 @@ exec "${PYTHON_BIN}" "${DIR}/run_deformable_detr_commonforms_v2.py" \
   --save_total_limit "${SAVE_TOTAL_LIMIT:-3}" \
   --load_best_model_at_end \
   --metric_for_best_model "${METRIC_FOR_BEST_MODEL:-eval_loss}" \
+  --greater_is_better false \
+  --early_stopping_patience "${EARLY_STOPPING_PATIENCE:-5}" \
+  --early_stopping_threshold "${EARLY_STOPPING_THRESHOLD:-0.01}" \
   --dataloader_num_workers "${DATALOADER_NUM_WORKERS:-8}" \
   --report_to "${REPORT_TO:-tensorboard}" \
   --seed "${SEED:-42}" \
