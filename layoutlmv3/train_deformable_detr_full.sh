@@ -24,6 +24,16 @@ fi
 
 export TOKENIZERS_PARALLELISM=false
 
+# Start TensorBoard in background
+TENSORBOARD_LOG_DIR="${OUTPUT_DIR}/logs"
+if command -v tensorboard &> /dev/null; then
+  echo "Starting TensorBoard on port 6006..."
+  tensorboard --logdir "${TENSORBOARD_LOG_DIR}" --host 0.0.0.0 --port 6006 &
+  TENSORBOARD_PID=$!
+  echo "TensorBoard started with PID ${TENSORBOARD_PID}"
+  echo "Access via RunPod HTTP Services on port 6006"
+fi
+
 exec "${PYTHON_BIN}" "${DIR}/run_deformable_detr_commonforms_v2.py" \
   --model_name_or_path Aryn/deformable-detr-DocLayNet \
   --dataset_name jbarrow/CommonForms \
@@ -46,7 +56,7 @@ exec "${PYTHON_BIN}" "${DIR}/run_deformable_detr_commonforms_v2.py" \
   --dataloader_num_workers "${DATALOADER_NUM_WORKERS:-8}" \
   --report_to "${REPORT_TO:-tensorboard}" \
   --seed "${SEED:-42}" \
-  --fp16 \
+  --bf16 \
   --do_train \
   --do_eval \
   --push_to_hub \
