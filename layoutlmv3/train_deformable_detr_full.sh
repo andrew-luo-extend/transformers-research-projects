@@ -60,7 +60,6 @@ exec "${PYTHON_BIN}" "${DIR}/run_deformable_detr_commonforms_v2.py" \
   --dataloader_num_workers "${DATALOADER_NUM_WORKERS:-8}" \
   --report_to "${REPORT_TO:-tensorboard}" \
   --seed "${SEED:-42}" \
-  --bf16 \
   --do_train \
   --do_eval \
   --push_to_hub \

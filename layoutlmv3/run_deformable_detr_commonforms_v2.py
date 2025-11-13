@@ -1325,6 +1325,9 @@ def main() -> None:
         logger.info("=" * 80)
         logger.info("Starting training")
         logger.info("=" * 80)
+
+        # Test forward pass before training to catch NaN early
+        logger.info("Testing model forward pass on first batch...")
         try:
             first_batch = next(iter(trainer.get_train_dataloader()))
 
@@ -1433,6 +1436,37 @@ def main() -> None:
                         logger.info("=" * 60)
 
             logger.info("✓ Sanity check passed: all samples have valid bboxes")
+
+            # Test model forward pass to detect NaN before training starts
+            logger.info("Testing model forward pass...")
+            model.eval()
+            with torch.no_grad():
+                test_batch = {k: v.to(model.device) if isinstance(v, torch.Tensor) else v
+                             for k, v in first_batch.items()}
+                try:
+                    test_output = model(**test_batch)
+
+                    # Check for NaN in predictions
+                    if hasattr(test_output, 'logits'):
+                        pred_logits = test_output.logits
+                        if torch.isnan(pred_logits).any():
+                            logger.error("❌ NaN detected in model predictions (logits)")
+                            logger.error(f"   NaN count: {torch.isnan(pred_logits).sum().item()}/{pred_logits.numel()}")
+                            raise ValueError("Model produces NaN predictions before training even starts!")
+
+                    if hasattr(test_output, 'pred_boxes'):
+                        pred_boxes = test_output.pred_boxes
+                        if torch.isnan(pred_boxes).any():
+                            logger.error("❌ NaN detected in model predictions (boxes)")
+                            logger.error(f"   NaN count: {torch.isnan(pred_boxes).sum().item()}/{pred_boxes.numel()}")
+                            raise ValueError("Model produces NaN box predictions before training even starts!")
+
+                    logger.info("✓ Forward pass successful - no NaN in predictions")
+                except Exception as e:
+                    logger.error(f"❌ Forward pass failed: {e}")
+                    raise
+            model.train()
+
         except StopIteration:
             logger.warning("Training dataloader yielded no batches during sanity check.")
         except Exception as exc:
