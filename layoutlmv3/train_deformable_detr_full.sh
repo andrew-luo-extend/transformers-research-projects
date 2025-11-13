@@ -29,7 +29,7 @@ echo "Checking for existing TensorBoard process on port 6006..."
 lsof -ti:6006 | xargs kill -9 2>/dev/null && echo "Killed existing TensorBoard" || echo "No existing TensorBoard found"
 
 # Start TensorBoard in background
-TENSORBOARD_LOG_DIR="${OUTPUT_DIR}/logs"
+TENSORBOARD_LOG_DIR="${OUTPUT_DIR}/runs"
 if command -v tensorboard &> /dev/null; then
   echo "Starting TensorBoard on port 6006..."
   tensorboard --logdir "${TENSORBOARD_LOG_DIR}" --host 0.0.0.0 --port 6006 &
