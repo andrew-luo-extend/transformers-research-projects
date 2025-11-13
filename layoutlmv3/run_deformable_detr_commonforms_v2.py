@@ -635,7 +635,7 @@ def preprocess_examples(
     processed_images: List[np.ndarray] = []
     processed_targets: List[Dict[str, Any]] = []
     skip_reasons: Dict[str, int] = {}
-    debug_logged = False  # Only log detailed debug info for first sample
+    debug_logged = False  # Log detailed debug info for first sample of each batch
 
     for idx, (image_id, image, objects) in enumerate(zip(image_ids, images, objects_list)):
         try:
