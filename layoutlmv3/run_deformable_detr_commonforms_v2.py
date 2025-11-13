@@ -312,7 +312,7 @@ class DataArguments:
         metadata={"help": "Optional cap on the number of evaluation samples."},
     )
     image_size: int = field(
-        default=1000,
+        default=1025,
         metadata={"help": "Target longest edge (pixels) after augmentation."},
     )
     filter_empty_annotations: bool = field(
