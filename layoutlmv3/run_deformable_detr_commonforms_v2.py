@@ -1287,6 +1287,32 @@ def main() -> None:
 
     logger.info("✓ All prediction heads reinitialized with small weights")
 
+    # CRITICAL FIX: Add hooks to catch NaN in forward pass
+    # Based on https://github.com/ultralytics/ultralytics/issues/7594
+    # The issue is likely in attention mechanism producing -inf -> NaN
+    logger.info("Adding NaN detection hooks to model...")
+
+    def check_nan_hook(module, input, output):
+        """Hook to detect NaN in module outputs"""
+        if isinstance(output, torch.Tensor):
+            if torch.isnan(output).any() or torch.isinf(output).any():
+                logger.error(f"❌ NaN/Inf detected in {module.__class__.__name__}")
+                logger.error(f"   Input shape: {input[0].shape if isinstance(input, tuple) and len(input) > 0 else 'N/A'}")
+                logger.error(f"   Output shape: {output.shape}")
+                logger.error(f"   NaN count: {torch.isnan(output).sum().item()}")
+                logger.error(f"   Inf count: {torch.isinf(output).sum().item()}")
+
+    # Add hooks to attention modules (where NaN typically originates)
+    hook_handles = []
+    if hasattr(model, 'model'):
+        for name, module in model.model.named_modules():
+            if 'attn' in name.lower() or 'attention' in name.lower():
+                handle = module.register_forward_hook(check_nan_hook)
+                hook_handles.append(handle)
+                logger.debug(f"  Added NaN detection hook to: {name}")
+
+    logger.info(f"✓ Added {len(hook_handles)} NaN detection hooks")
+
     # CRITICAL FIX: Freeze backbone to prevent NaN propagation
     # The NaN is likely coming from unstable gradients in the backbone
     # when combined with the reinitialized heads
