@@ -118,6 +118,16 @@ def safe_linear_sum_assignment(cost_matrix, *args, **kwargs):
 # Apply the monkey-patch
 scipy.optimize.linear_sum_assignment = safe_linear_sum_assignment
 
+# NOW import transformers (after the monkey-patch is applied)
+from transformers import (
+    AutoConfig,
+    AutoImageProcessor,
+    AutoModelForObjectDetection,
+    HfArgumentParser,
+    Trainer,
+    TrainingArguments,
+    set_seed,
+)
 
 logger = logging.getLogger(__name__)
 
