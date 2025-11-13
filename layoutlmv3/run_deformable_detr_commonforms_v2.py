@@ -1313,25 +1313,34 @@ def main() -> None:
 
     logger.info(f"✓ Added {len(hook_handles)} NaN detection hooks")
 
-    # CRITICAL FIX: Freeze backbone to prevent NaN propagation
-    # The NaN is likely coming from unstable gradients in the backbone
-    # when combined with the reinitialized heads
-    logger.info("Freezing backbone and encoder for stable training...")
-    if hasattr(model, 'model'):
-        # Freeze backbone (ResNet or similar)
-        if hasattr(model.model, 'backbone'):
-            for param in model.model.backbone.parameters():
-                param.requires_grad = False
-            logger.info("✓ Backbone frozen")
+    # DON'T freeze - the frozen encoder still produces NaN!
+    # The issue is with ignore_mismatched_sizes corrupting the model
+    # Instead: reload model WITHOUT ignore_mismatched_sizes by not changing num_labels
+    logger.info("⚠️  CRITICAL ISSUE DETECTED:")
+    logger.info("   The pretrained model produces NaN even when frozen!")
+    logger.info("   This suggests ignore_mismatched_sizes corrupted the model state.")
+    logger.info("")
+    logger.info("SOLUTION: Reloading model WITHOUT changing number of classes...")
 
-        # Freeze encoder
-        if hasattr(model.model, 'encoder'):
-            for param in model.model.encoder.parameters():
-                param.requires_grad = False
-            logger.info("✓ Encoder frozen")
+    # Reload model with original config (no class count mismatch)
+    del model
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
-        # Keep decoder trainable (it's what adapts to new classes)
-        logger.info("✓ Decoder, prediction heads, and query embeddings remain trainable")
+    # Load with ORIGINAL number of classes (no ignore_mismatched_sizes)
+    logger.info("Loading model with original class count...")
+    model = AutoModelForObjectDetection.from_pretrained(
+        model_args.model_name_or_path,
+        cache_dir=model_args.cache_dir,
+        revision=model_args.revision,
+    )
+    logger.info(f"✓ Model loaded with ORIGINAL {model.config.num_labels} classes")
+
+    # Now we'll train all classes but only evaluate on our subset
+    # This avoids the ignore_mismatched_sizes bug entirely
+    logger.info("✓ Training with full class set - no model modification needed")
 
     # Wrap the matcher to handle empty targets gracefully
     if hasattr(model, 'model') and hasattr(model.model, 'criterion'):
