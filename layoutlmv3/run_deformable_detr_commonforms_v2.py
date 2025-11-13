@@ -1148,7 +1148,16 @@ def main() -> None:
         logger.warning("Evaluation requested but no eval split found. Skipping evaluation.")
         training_args.do_eval = False
 
-    # Filter datasets to ensure all samples have valid bboxes
+    # Limit dataset size FIRST (for faster testing), then filter
+    if training_args.do_train and data_args.max_train_samples:
+        logger.info(f"Limiting training dataset to {data_args.max_train_samples} samples for testing...")
+        train_dataset = limit_dataset(train_dataset, data_args.max_train_samples, data_args.use_streaming)
+
+    if training_args.do_eval and data_args.max_eval_samples:
+        logger.info(f"Limiting evaluation dataset to {data_args.max_eval_samples} samples for testing...")
+        eval_dataset = limit_dataset(eval_dataset, data_args.max_eval_samples, data_args.use_streaming)
+
+    # Now filter the limited dataset (much faster for testing)
     if data_args.filter_empty_annotations:
         if train_dataset is not None and not data_args.use_streaming:
             logger.info("Filtering training dataset - requiring valid bboxes (finite, positive dimensions)...")
@@ -1177,12 +1186,6 @@ def main() -> None:
             logger.info(f"Evaluation set: {filtered_size} samples with valid bboxes")
     else:
         logger.info("Keeping all samples (including empty/invalid ones) - ensure matcher can handle this!")
-
-    if training_args.do_train and data_args.max_train_samples:
-        train_dataset = limit_dataset(train_dataset, data_args.max_train_samples, data_args.use_streaming)
-
-    if training_args.do_eval and data_args.max_eval_samples:
-        eval_dataset = limit_dataset(eval_dataset, data_args.max_eval_samples, data_args.use_streaming)
 
     log_split_size(actual_train_name or "train", train_dataset, data_args.use_streaming)
     log_split_size(actual_eval_name or "eval", eval_dataset, data_args.use_streaming)
