@@ -35,9 +35,9 @@ exec "${PYTHON_BIN}" "${DIR}/run_deformable_detr_commonforms_v2.py" \
   --per_device_train_batch_size "${PER_DEVICE_TRAIN_BATCH_SIZE:-2}" \
   --per_device_eval_batch_size "${PER_DEVICE_EVAL_BATCH_SIZE:-2}" \
   --learning_rate "${LEARNING_RATE:-1e-5}" \
-  --warmup_ratio "${WARMUP_RATIO:-0.1}" \
+  --warmup_ratio "${WARMUP_RATIO:-0.3}" \
   --weight_decay "${WEIGHT_DECAY:-1e-4}" \
-  --max_grad_norm "${MAX_GRAD_NORM:-1.0}" \
+  --max_grad_norm "${MAX_GRAD_NORM:-0.1}" \
   --logging_steps "${LOGGING_STEPS:-5}" \
   --save_strategy "no" \
   --eval_strategy "no" \

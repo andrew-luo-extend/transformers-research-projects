@@ -1238,14 +1238,33 @@ def main() -> None:
     model_config.num_labels = len(id2label)
 
     logger.info("Loading model weights...")
+    logger.info(f"Model config num_labels: {model_config.num_labels}")
+    logger.info(f"Dataset categories: {len(id2label)}")
+
+    # Load with ignore_mismatched_sizes=True to handle class count mismatch
+    # The pretrained model (DocLayNet) has more classes than CommonForms
     model = AutoModelForObjectDetection.from_pretrained(
         model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
         revision=model_args.revision,
         config=model_config,
-        ignore_mismatched_sizes=True,
+        ignore_mismatched_sizes=True,  # Required: pretrained model has different num_classes
     )
     logger.info("Model loaded with %d detection classes.", model.config.num_labels)
+
+    # CRITICAL: Reinitialize the classification head with smaller init for stability
+    # The randomly initialized class head can cause explosive gradients
+    logger.info("Reinitializing classification head for stable training...")
+    if hasattr(model, 'model') and hasattr(model.model, 'class_embed'):
+        # Deformable DETR has class_embed in model.model
+        for layer in model.model.class_embed:
+            if hasattr(layer, 'weight'):
+                torch.nn.init.normal_(layer.weight, mean=0.0, std=0.01)  # Small init
+                if hasattr(layer, 'bias') and layer.bias is not None:
+                    torch.nn.init.constant_(layer.bias, 0.0)
+        logger.info("✓ Classification head reinitialized with smaller weights")
+    else:
+        logger.warning("Could not find class_embed to reinitialize - training may be unstable")
 
     # Wrap the matcher to handle empty targets gracefully
     if hasattr(model, 'model') and hasattr(model.model, 'criterion'):
