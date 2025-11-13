@@ -537,18 +537,15 @@ def create_transforms(image_size: int, is_train: bool) -> A.Compose:
     Note: Albumentations expects RGB images and COCO format bboxes [x, y, width, height].
     """
     if is_train:
-        # SIMPLIFIED FOR TROUBLESHOOTING: Only basic transforms, no rotation/scale/augmentation
-        # Testing if augmentations produce extreme coords that cause NaNs
         return A.Compose(
             [
                 A.LongestMaxSize(image_size),
                 A.PadIfNeeded(image_size, image_size, border_mode=0, value=(0, 0, 0)),
-                # DISABLED FOR TESTING:
-                # A.HorizontalFlip(p=0.5),
-                # A.RandomBrightnessContrast(p=0.5),
-                # A.HueSaturationValue(p=0.1),
-                # A.Rotate(limit=10, p=0.5),
-                # A.RandomScale(scale_limit=0.2, p=0.5),
+                A.HorizontalFlip(p=0.5),
+                A.RandomBrightnessContrast(p=0.5),
+                A.HueSaturationValue(p=0.1),
+                A.Rotate(limit=10, p=0.5),
+                A.RandomScale(scale_limit=0.2, p=0.5),
             ],
             bbox_params=A.BboxParams(
                 format="coco",
@@ -1251,16 +1248,14 @@ def main() -> None:
     logger.info("Model loaded with %d detection classes.", model.config.num_labels)
 
     # Wrap the matcher to handle empty targets gracefully
-    # TEMPORARILY DISABLED for troubleshooting - testing if NaNs come from wrapper
-    # if hasattr(model, 'model') and hasattr(model.model, 'criterion'):
-    #     criterion = model.model.criterion
-    #     if hasattr(criterion, 'matcher'):
-    #         logger.info("Wrapping matcher to handle empty targets (negative samples)")
-    #         criterion.matcher = create_safe_matcher_wrapper(criterion.matcher)
-    #         logger.info("Matcher wrapped successfully")
-    # else:
-    #     logger.warning("Could not find matcher in model structure - matcher wrapping skipped")
-    logger.info("⚠️  MATCHER WRAPPER DISABLED FOR TROUBLESHOOTING")
+    if hasattr(model, 'model') and hasattr(model.model, 'criterion'):
+        criterion = model.model.criterion
+        if hasattr(criterion, 'matcher'):
+            logger.info("Wrapping matcher to handle empty targets (negative samples)")
+            criterion.matcher = create_safe_matcher_wrapper(criterion.matcher)
+            logger.info("Matcher wrapped successfully")
+    else:
+        logger.warning("Could not find matcher in model structure - matcher wrapping skipped")
 
     train_transform = create_transforms(data_args.image_size, is_train=True)
     eval_transform = create_transforms(data_args.image_size, is_train=False)
