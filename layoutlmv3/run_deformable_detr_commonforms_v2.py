@@ -1258,30 +1258,32 @@ def main() -> None:
     # - NaN predictions from bbox head
     logger.info("Reinitializing prediction heads for stable training...")
 
-    # Reinitialize classification head
+    # Reinitialize classification head with EXTREMELY small weights
     if hasattr(model, 'model') and hasattr(model.model, 'class_embed'):
         for layer in model.model.class_embed:
             if hasattr(layer, 'weight'):
-                torch.nn.init.normal_(layer.weight, mean=0.0, std=0.001)  # Very small init
+                # Use even smaller init to prevent NaN in first forward pass
+                torch.nn.init.normal_(layer.weight, mean=0.0, std=0.0001)
                 if hasattr(layer, 'bias') and layer.bias is not None:
-                    torch.nn.init.constant_(layer.bias, 0.0)
-        logger.info("✓ Classification head reinitialized")
+                    # Initialize bias to small negative value (favors "no object" class)
+                    torch.nn.init.constant_(layer.bias, -2.0)
+        logger.info("✓ Classification head reinitialized with std=0.0001")
 
-    # Reinitialize bbox regression head
+    # Reinitialize bbox regression head with smaller init
     if hasattr(model, 'model') and hasattr(model.model, 'bbox_embed'):
         for layer in model.model.bbox_embed:
             if hasattr(layer, 'layers'):
-                # MLP with multiple layers
+                # MLP with multiple layers - use very small init
                 for sublayer in layer.layers:
                     if hasattr(sublayer, 'weight'):
-                        torch.nn.init.xavier_uniform_(sublayer.weight, gain=0.01)
+                        torch.nn.init.xavier_uniform_(sublayer.weight, gain=0.001)  # Even smaller
                         if hasattr(sublayer, 'bias') and sublayer.bias is not None:
                             torch.nn.init.constant_(sublayer.bias, 0.0)
             elif hasattr(layer, 'weight'):
-                torch.nn.init.xavier_uniform_(layer.weight, gain=0.01)
+                torch.nn.init.xavier_uniform_(layer.weight, gain=0.001)  # Even smaller
                 if hasattr(layer, 'bias') and layer.bias is not None:
                     torch.nn.init.constant_(layer.bias, 0.0)
-        logger.info("✓ Bbox regression head reinitialized")
+        logger.info("✓ Bbox regression head reinitialized with gain=0.001")
 
     logger.info("✓ All prediction heads reinitialized with small weights")
 
