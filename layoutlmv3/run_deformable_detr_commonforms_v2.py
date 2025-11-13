@@ -1363,7 +1363,7 @@ def main() -> None:
 
         train_result = trainer.train()
         # Use safe_serialization=False to handle shared tensors in Deformable DETR
-        trainer.save_model(safe_serialization=False)
+        trainer.save_model()
         trainer.log_metrics("train", train_result.metrics)
         trainer.save_metrics("train", train_result.metrics)
         trainer.save_state()
