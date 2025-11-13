@@ -1287,6 +1287,26 @@ def main() -> None:
 
     logger.info("✓ All prediction heads reinitialized with small weights")
 
+    # CRITICAL FIX: Freeze backbone to prevent NaN propagation
+    # The NaN is likely coming from unstable gradients in the backbone
+    # when combined with the reinitialized heads
+    logger.info("Freezing backbone and encoder for stable training...")
+    if hasattr(model, 'model'):
+        # Freeze backbone (ResNet or similar)
+        if hasattr(model.model, 'backbone'):
+            for param in model.model.backbone.parameters():
+                param.requires_grad = False
+            logger.info("✓ Backbone frozen")
+
+        # Freeze encoder
+        if hasattr(model.model, 'encoder'):
+            for param in model.model.encoder.parameters():
+                param.requires_grad = False
+            logger.info("✓ Encoder frozen")
+
+        # Keep decoder trainable (it's what adapts to new classes)
+        logger.info("✓ Decoder, prediction heads, and query embeddings remain trainable")
+
     # Wrap the matcher to handle empty targets gracefully
     if hasattr(model, 'model') and hasattr(model.model, 'criterion'):
         criterion = model.model.criterion
