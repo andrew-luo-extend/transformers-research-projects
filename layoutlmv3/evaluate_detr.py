@@ -261,6 +261,12 @@ def evaluate_coco_metrics(dataset, predictions, output_dir):
     # Create COCO ground truth object
     coco_gt = COCO()
     coco_gt.dataset = {
+        "info": {
+            "description": f"Evaluation on {args.dataset_name}",
+            "version": "1.0",
+            "year": 2024,
+        },
+        "licenses": [],
         "images": coco_images,
         "annotations": coco_annotations,
         "categories": categories,
