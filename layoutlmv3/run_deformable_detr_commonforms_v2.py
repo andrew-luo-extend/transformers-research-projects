@@ -1317,31 +1317,34 @@ def main() -> None:
     # DON'T freeze - the frozen encoder still produces NaN!
     # The issue is with ignore_mismatched_sizes corrupting the model
     # Instead: reload model WITHOUT ignore_mismatched_sizes by not changing num_labels
-    logger.info("⚠️  CRITICAL ISSUE DETECTED:")
-    logger.info("   The pretrained model produces NaN even when frozen!")
-    logger.info("   This suggests ignore_mismatched_sizes corrupted the model state.")
-    logger.info("")
-    logger.info("SOLUTION: Reloading model WITHOUT changing number of classes...")
-
-    # Reload model with original config (no class count mismatch)
-    del model
-    import gc
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-    # Load with ORIGINAL number of classes (no ignore_mismatched_sizes)
-    logger.info("Loading model with original class count...")
-    model = AutoModelForObjectDetection.from_pretrained(
-        model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        revision=model_args.revision,
-    )
-    logger.info(f"✓ Model loaded with ORIGINAL {model.config.num_labels} classes")
-
-    # Now we'll train all classes but only evaluate on our subset
-    # This avoids the ignore_mismatched_sizes bug entirely
-    logger.info("✓ Training with full class set - no model modification needed")
+    # The model is already loaded correctly with id2label and label2id
+    # No need to reload - this would lose the class mapping!
+    logger.info(f"✓ Model configured with {len(id2label)} classes for CommonForms")
+    logger.info(f"   Class mapping: {id2label}")
+    
+    # VERIFICATION: Check model actually has correct labels
+    logger.info("="*80)
+    logger.info("🔍 MODEL CONFIGURATION VERIFICATION")
+    logger.info("="*80)
+    logger.info(f"Expected classes (from dataset): {len(id2label)}")
+    logger.info(f"Expected id2label: {id2label}")
+    logger.info(f"\nActual model config:")
+    logger.info(f"  num_labels: {model.config.num_labels}")
+    logger.info(f"  id2label: {model.config.id2label}")
+    
+    if model.config.num_labels != len(id2label):
+        logger.error(f"❌ MISMATCH! Model has {model.config.num_labels} classes, dataset has {len(id2label)}")
+        logger.error("⚠️  This will cause incorrect training! Check model loading code.")
+        raise ValueError("Model/dataset class count mismatch!")
+    
+    if model.config.id2label != id2label:
+        logger.warning(f"⚠️  WARNING: Model id2label differs from dataset!")
+        logger.warning(f"   This might cause evaluation issues later.")
+        logger.warning(f"   Model will train but might not evaluate correctly.")
+    else:
+        logger.info(f"✅ VERIFIED: Model class configuration matches dataset!")
+    
+    logger.info("="*80 + "\n")
 
     # Wrap the matcher to handle empty targets gracefully
     if hasattr(model, 'model') and hasattr(model.model, 'criterion'):
