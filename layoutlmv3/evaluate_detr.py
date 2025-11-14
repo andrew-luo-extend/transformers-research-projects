@@ -206,12 +206,36 @@ def run_inference(model, processor, dataset, device):
                 target_size = torch.tensor([image.size[::-1]]).to(device)
             else:
                 target_size = torch.tensor([image.shape[:2]]).to(device)
+            
+            # Debug first image to check bbox format
+            if idx == 0:
+                logger.info(f"\n🔍 DEBUG: First image processing")
+                logger.info(f"   Image size: {image.size if isinstance(image, Image.Image) else image.shape[:2]}")
+                logger.info(f"   Input tensor shape: {inputs['pixel_values'].shape}")
+                logger.info(f"   Target size for post-processing: {target_size}")
+                logger.info(f"   Raw model output boxes shape: {outputs['pred_boxes'].shape}")
+                logger.info(f"   Raw model output boxes (first 3):")
+                raw_boxes = outputs['pred_boxes'][0][:3].cpu()
+                for i, box in enumerate(raw_boxes):
+                    logger.info(f"      Raw box {i}: {box.tolist()}")
+                logger.info(f"   These should be in normalized [cx, cy, w, h] format (0-1 range)")
 
             results = processor.post_process_object_detection(
                 outputs,
                 threshold=0.0,  # Keep all predictions for mAP calculation
                 target_sizes=target_size,
             )
+            
+            # Debug first image after post-processing
+            if idx == 0:
+                logger.info(f"   After post_process_object_detection:")
+                logger.info(f"   Number of boxes: {len(results[0]['boxes'])}")
+                logger.info(f"   Boxes format: should be [x1, y1, x2, y2] in absolute pixels")
+                logger.info(f"   First 3 boxes:")
+                for i, box in enumerate(results[0]['boxes'][:3]):
+                    logger.info(f"      Box {i}: {box.tolist()}")
+                logger.info(f"   First 3 scores: {results[0]['scores'][:3].tolist()}")
+                logger.info(f"   First 3 labels: {results[0]['labels'][:3].tolist()}")
 
             # Store predictions (results is a list with one element)
             predictions[image_id] = results[0]
