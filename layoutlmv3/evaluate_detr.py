@@ -217,6 +217,20 @@ def run_inference(model, processor, dataset, device):
             predictions[image_id] = results[0]
 
     logger.info(f"✓ Generated predictions for {len(predictions)} images")
+    
+    # Debug: Show predicted categories
+    all_predicted_labels = []
+    for pred in predictions.values():
+        if len(pred["labels"]) > 0:
+            all_predicted_labels.extend(pred["labels"].tolist())
+    
+    if len(all_predicted_labels) > 0:
+        unique_predicted = set(all_predicted_labels)
+        logger.info(f"Predicted categories: {sorted(unique_predicted)}")
+        logger.info(f"Total predictions: {len(all_predicted_labels)}")
+    else:
+        logger.warning("⚠️  No objects detected in any image!")
+    
     return predictions
 
 
@@ -274,11 +288,31 @@ def evaluate_coco_metrics(dataset, predictions, output_dir, dataset_name="Common
     coco_gt.createIndex()
 
     logger.info(f"✓ Ground truth: {len(coco_images)} images, {len(coco_annotations)} annotations")
+    
+    # Debug: Show ground truth categories
+    gt_categories = set([ann["category_id"] for ann in coco_annotations])
+    logger.info(f"Ground truth categories: {sorted(gt_categories)}")
+    logger.info(f"Category mapping: {categories}")
 
     # Prepare predictions in COCO format
     logger.info("Preparing predictions...")
     coco_results = prepare_for_coco_detection(predictions)
     logger.info(f"✓ Predictions: {len(coco_results)} detections")
+    
+    # Debug: Show predicted categories in COCO results
+    if len(coco_results) > 0:
+        pred_categories = set([pred["category_id"] for pred in coco_results])
+        logger.info(f"Predicted category IDs in detections: {sorted(pred_categories)}")
+        logger.info(f"⚠️  CATEGORY MISMATCH CHECK:")
+        logger.info(f"   Ground truth has categories: {sorted(gt_categories)}")
+        logger.info(f"   Predictions have categories: {sorted(pred_categories)}")
+        
+        overlap = gt_categories.intersection(pred_categories)
+        if len(overlap) == 0:
+            logger.warning(f"   ❌ NO OVERLAP! Model is predicting different category IDs than ground truth!")
+            logger.warning(f"   This explains why mAP is 0.000")
+        else:
+            logger.info(f"   ✓ Overlap: {sorted(overlap)}")
 
     if len(coco_results) == 0:
         logger.warning("⚠️  No predictions generated! Model may not be detecting any objects.")
@@ -312,10 +346,23 @@ def evaluate_coco_metrics(dataset, predictions, output_dir, dataset_name="Common
         coco_eval_cat.accumulate()
 
         # Get AP @ IoU 0.5:0.95
-        ap = coco_eval_cat.stats[0]  # AP @ IoU 0.5:0.95
+        # Check if stats has been populated
+        if hasattr(coco_eval_cat, 'stats') and len(coco_eval_cat.stats) > 0:
+            ap = coco_eval_cat.stats[0]  # AP @ IoU 0.5:0.95
+        else:
+            # No detections for this category
+            try:
+                coco_eval_cat.summarize()
+                ap = coco_eval_cat.stats[0] if len(coco_eval_cat.stats) > 0 else -1.0
+            except:
+                ap = -1.0
+        
         per_class_ap[cat_name] = float(ap)
 
-        logger.info(f"  {cat_name:30s}: {ap:.4f}")
+        if ap == -1.0:
+            logger.info(f"  {cat_name:30s}: No predictions")
+        else:
+            logger.info(f"  {cat_name:30s}: {ap:.4f}")
 
     logger.info("=" * 80)
 
