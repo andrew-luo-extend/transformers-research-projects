@@ -124,6 +124,22 @@ def prepare_ground_truth(dataset):
 
     annotation_id = 1
 
+    # Detect which key holds the category information
+    # Try common candidates: category, category_id, label, class
+    category_key = None
+    if len(dataset) > 0:
+        first_sample = dataset[0]
+        objects = first_sample.get("objects", {})
+        for candidate in ["category", "category_id", "label", "class", "id"]:
+            if candidate in objects:
+                category_key = candidate
+                logger.debug(f"Using category key: {category_key}")
+                break
+
+    if category_key is None:
+        category_key = "category"  # Default fallback
+        logger.warning(f"Could not detect category key, using default: {category_key}")
+
     for idx, sample in enumerate(dataset):
         image_id = sample.get("id", idx)
 
@@ -141,9 +157,9 @@ def prepare_ground_truth(dataset):
         })
 
         # Get annotations
-        objects = sample["objects"]
-        boxes = objects["bbox"]
-        categories = objects["category"]
+        objects = sample.get("objects", {})
+        boxes = objects.get("bbox", [])
+        categories = objects.get(category_key, [])
 
         for box, category in zip(boxes, categories):
             # Convert [x, y, w, h] to COCO format
@@ -211,17 +227,36 @@ def evaluate_coco_metrics(dataset, predictions, output_dir):
     coco_images, coco_annotations = prepare_ground_truth(dataset)
 
     # Get category names if available
-    if hasattr(dataset.features["objects"].feature["category"], "names"):
-        category_names = dataset.features["objects"].feature["category"].names
+    try:
+        # Try different ways to access category names
+        if hasattr(dataset.features["objects"], "feature"):
+            # Datasets >= 2.0 format
+            category_feature = dataset.features["objects"].feature["category"]
+        else:
+            # Older datasets format - objects is a dict of features
+            category_feature = dataset.features["objects"]["category"]
+
+        # Get names if available
+        if hasattr(category_feature, "names"):
+            category_names = category_feature.names
+        elif hasattr(category_feature, "_str2int"):
+            # Alternative way to get class names
+            category_names = list(category_feature._str2int.keys())
+        else:
+            raise AttributeError("No category names found")
+
         categories = [
             {"id": i, "name": name} for i, name in enumerate(category_names)
         ]
-    else:
+        logger.info(f"Found {len(categories)} category names from dataset")
+    except (AttributeError, KeyError) as e:
+        logger.warning(f"Could not extract category names from dataset: {e}")
         # Use generic category names
         num_categories = max([ann["category_id"] for ann in coco_annotations]) + 1
         categories = [
             {"id": i, "name": f"class_{i}"} for i in range(num_categories)
         ]
+        logger.info(f"Using generic category names for {num_categories} classes")
 
     # Create COCO ground truth object
     coco_gt = COCO()
