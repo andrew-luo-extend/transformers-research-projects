@@ -220,7 +220,7 @@ def run_inference(model, processor, dataset, device):
     return predictions
 
 
-def evaluate_coco_metrics(dataset, predictions, output_dir):
+def evaluate_coco_metrics(dataset, predictions, output_dir, dataset_name="CommonForms"):
     """Evaluate predictions using COCO metrics."""
     # Prepare ground truth in COCO format
     logger.info("Preparing ground truth annotations...")
@@ -262,7 +262,7 @@ def evaluate_coco_metrics(dataset, predictions, output_dir):
     coco_gt = COCO()
     coco_gt.dataset = {
         "info": {
-            "description": f"Evaluation on {args.dataset_name}",
+            "description": f"Evaluation on {dataset_name}",
             "version": "1.0",
             "year": 2024,
         },
@@ -430,7 +430,9 @@ def main():
     predictions = run_inference(model, processor, dataset, device)
 
     # Evaluate
-    coco_eval, per_class_ap, categories = evaluate_coco_metrics(dataset, predictions, output_dir)
+    coco_eval, per_class_ap, categories = evaluate_coco_metrics(
+        dataset, predictions, output_dir, dataset_name=args.dataset_name
+    )
 
     # Save results
     save_results(args, coco_eval, per_class_ap, output_dir)
