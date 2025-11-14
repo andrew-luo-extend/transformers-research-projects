@@ -313,6 +313,21 @@ def evaluate_coco_metrics(dataset, predictions, output_dir, dataset_name="Common
             logger.warning(f"   This explains why mAP is 0.000")
         else:
             logger.info(f"   ✓ Overlap: {sorted(overlap)}")
+        
+        # Debug: Show sample bbox values to check coordinate system
+        logger.info(f"\n📦 BBOX COORDINATE CHECK:")
+        logger.info(f"   Sample ground truth boxes (first 3):")
+        for i, ann in enumerate(coco_annotations[:3]):
+            logger.info(f"      GT {i}: {ann['bbox']} (image_id={ann['image_id']}, cat={ann['category_id']})")
+        
+        logger.info(f"   Sample predictions (first 3):")
+        for i, pred in enumerate(coco_results[:3]):
+            logger.info(f"      Pred {i}: {pred['bbox']} (image_id={pred['image_id']}, cat={pred['category_id']}, score={pred['score']:.3f})")
+        
+        # Check image size to see if predictions are reasonable
+        first_img = coco_images[0]
+        logger.info(f"   First image dimensions: {first_img['width']}x{first_img['height']}")
+        logger.info(f"   ⚠️  If predicted boxes have values > image dimensions, there's a scaling issue!")
 
     if len(coco_results) == 0:
         logger.warning("⚠️  No predictions generated! Model may not be detecting any objects.")
