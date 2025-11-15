@@ -280,10 +280,15 @@ def convert_hf_to_coco_format(dataset, output_dir, split_name="train"):
     with open(annotations_path, "w") as f:
         json.dump(coco_output, f, indent=2)
     
-    logger.info(f"✓ {split_name} split converted:")
-    logger.info(f"   Images: {len(coco_output['images'])}")
-    logger.info(f"   Annotations: {len(coco_output['annotations'])}")
+    logger.info(f"✓ {split_name} split processed:")
+    logger.info(f"   Images already converted: {skipped_count}")
+    logger.info(f"   Images newly converted: {converted_count}")
+    logger.info(f"   Total images: {len(coco_output['images'])}")
+    logger.info(f"   Total annotations: {len(coco_output['annotations'])}")
     logger.info(f"   Saved to: {split_dir}")
+    
+    if skipped_count > 0:
+        logger.info(f"   ✓ Resumed from previous run ({skipped_count} images reused)")
     
     return split_dir
 
