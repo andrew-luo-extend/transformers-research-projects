@@ -1,0 +1,35 @@
+# Requirements for RF-DETR training
+# Install with: pip install -r requirements_rfdetr.txt
+
+# Core RF-DETR (check actual package name/repo)
+# NOTE: RF-DETR might not be on PyPI yet - may need to install from GitHub
+# rfdetr  # If available on PyPI
+# OR install from source:
+# git+https://github.com/<rf-detr-repo>/rfdetr.git
+
+# Core dependencies
+torch>=2.0.0
+torchvision>=0.15.0
+pillow>=9.0.0
+tqdm>=4.65.0
+
+# HuggingFace datasets
+datasets>=2.14.0
+huggingface_hub>=0.16.0
+
+# For COCO format
+pycocotools>=2.0.6
+
+# Optional: For faster training
+accelerate>=0.20.0
+
+# Note: RF-DETR installation
+# =========================
+# If rfdetr is not on PyPI, install from GitHub:
+# pip install git+https://github.com/[rf-detr-repo]/rfdetr.git
+#
+# Or clone and install locally:
+# git clone https://github.com/[rf-detr-repo]/rfdetr.git
+# cd rfdetr
+# pip install -e .
+

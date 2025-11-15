@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+#
+# Train RF-DETR on CommonForms (Full Dataset)
+#
+# RF-DETR is faster than regular DETR while maintaining accuracy.
+# Recommended batch_size × grad_accum_steps = 16 for optimal training
+#
+# GPU Recommendations:
+#   H100/A100: batch_size=16, grad_accum_steps=1
+#   L40S:      batch_size=8,  grad_accum_steps=2
+#   T4:        batch_size=4,  grad_accum_steps=4
+#
+
+set -euo pipefail
+
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_BIN="${PYTHON:-python3}"
+
+# Configuration
+: "${HF_USERNAME:?Set HF_USERNAME to your Hugging Face username.}"
+
+MODEL_ID="${HF_MODEL_ID:-${HF_USERNAME}/rfdetr-commonforms}"
+OUTPUT_DIR="${OUTPUT_DIR:-/workspace/outputs/rfdetr-commonforms}"
+CACHE_DIR="${CACHE_DIR:-/workspace/cache}"
+
+# Create directories
+mkdir -p "${OUTPUT_DIR}"
+mkdir -p "${CACHE_DIR}"
+
+# RF-DETR Training Parameters
+MODEL_SIZE="${MODEL_SIZE:-medium}"  # small, medium, or large
+EPOCHS="${EPOCHS:-30}"
+BATCH_SIZE="${BATCH_SIZE:-8}"
+GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-2}"  # batch_size × grad_accum = 16 (recommended)
+LEARNING_RATE="${LEARNING_RATE:-1e-4}"
+NUM_WORKERS="${NUM_WORKERS:-8}"
+
+echo "=========================================="
+echo "RF-DETR Training on CommonForms"
+echo "=========================================="
+echo "Model size: ${MODEL_SIZE}"
+echo "Epochs: ${EPOCHS}"
+echo "Batch size: ${BATCH_SIZE}"
+echo "Gradient accumulation: ${GRAD_ACCUM_STEPS}"
+echo "Effective batch size: $((BATCH_SIZE * GRAD_ACCUM_STEPS))"
+echo "Learning rate: ${LEARNING_RATE}"
+echo "Output: ${OUTPUT_DIR}"
+echo "=========================================="
+
+exec "${PYTHON_BIN}" "${DIR}/run_rfdetr_commonforms.py" \
+  --dataset_name jbarrow/CommonForms \
+  --cache_dir "${CACHE_DIR}" \
+  --output_dir "${OUTPUT_DIR}" \
+  --model_size "${MODEL_SIZE}" \
+  --epochs "${EPOCHS}" \
+  --batch_size "${BATCH_SIZE}" \
+  --grad_accum_steps "${GRAD_ACCUM_STEPS}" \
+  --learning_rate "${LEARNING_RATE}" \
+  --num_workers "${NUM_WORKERS}" \
+  --push_to_hub \
+  --hub_model_id "${MODEL_ID}"
+

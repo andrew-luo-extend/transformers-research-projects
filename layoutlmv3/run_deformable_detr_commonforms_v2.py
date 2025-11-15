@@ -1238,55 +1238,91 @@ def main() -> None:
     )
     model_config.num_labels = len(id2label)
 
-    logger.info("Loading model weights...")
-    logger.info(f"Model config num_labels: {model_config.num_labels}")
-    logger.info(f"Dataset categories: {len(id2label)}")
-
-    # Load with ignore_mismatched_sizes=True to handle class count mismatch
-    # The pretrained model (DocLayNet) has more classes than CommonForms
+    logger.info("="*80)
+    logger.info("🔧 MANUAL HEAD REPLACEMENT (Avoiding ignore_mismatched_sizes bug)")
+    logger.info("="*80)
+    
+    # STEP 1: Load pretrained model with ORIGINAL config
+    # This ensures clean weights without corruption
+    logger.info("Step 1: Loading pretrained model (with original class count)...")
     model = AutoModelForObjectDetection.from_pretrained(
         model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
         revision=model_args.revision,
-        config=model_config,
-        ignore_mismatched_sizes=True,  # Required: pretrained model has different num_classes
+        # NO config override, NO ignore_mismatched_sizes
     )
-    logger.info("Model loaded with %d detection classes.", model.config.num_labels)
-
-    # CRITICAL: Reinitialize BOTH classification AND bbox heads with smaller init for stability
-    # When ignore_mismatched_sizes=True, these heads are randomly initialized and can cause:
-    # - Explosive gradients from class head
-    # - NaN predictions from bbox head
-    logger.info("Reinitializing prediction heads for stable training...")
-
-    # Reinitialize classification head with EXTREMELY small weights
-    if hasattr(model, 'model') and hasattr(model.model, 'class_embed'):
-        for layer in model.model.class_embed:
-            if hasattr(layer, 'weight'):
-                # Use even smaller init to prevent NaN in first forward pass
-                torch.nn.init.normal_(layer.weight, mean=0.0, std=0.0001)
-                if hasattr(layer, 'bias') and layer.bias is not None:
-                    # Initialize bias to small negative value (favors "no object" class)
-                    torch.nn.init.constant_(layer.bias, -2.0)
-        logger.info("✓ Classification head reinitialized with std=0.0001")
-
-    # Reinitialize bbox regression head with smaller init
-    if hasattr(model, 'model') and hasattr(model.model, 'bbox_embed'):
-        for layer in model.model.bbox_embed:
-            if hasattr(layer, 'layers'):
-                # MLP with multiple layers - use very small init
-                for sublayer in layer.layers:
-                    if hasattr(sublayer, 'weight'):
-                        torch.nn.init.xavier_uniform_(sublayer.weight, gain=0.001)  # Even smaller
-                        if hasattr(sublayer, 'bias') and sublayer.bias is not None:
-                            torch.nn.init.constant_(sublayer.bias, 0.0)
-            elif hasattr(layer, 'weight'):
-                torch.nn.init.xavier_uniform_(layer.weight, gain=0.001)  # Even smaller
-                if hasattr(layer, 'bias') and layer.bias is not None:
-                    torch.nn.init.constant_(layer.bias, 0.0)
-        logger.info("✓ Bbox regression head reinitialized with gain=0.001")
-
-    logger.info("✓ All prediction heads reinitialized with small weights")
+    
+    original_num_classes = model.config.num_labels
+    new_num_classes = len(id2label)
+    
+    logger.info(f"✓ Model loaded")
+    logger.info(f"   Pretrained classes: {original_num_classes}")
+    logger.info(f"   Target classes: {new_num_classes}")
+    
+    # STEP 2: Manually replace classification head if needed
+    if original_num_classes != new_num_classes:
+        logger.info("")
+        logger.info("Step 2: Replacing classification head...")
+        
+        # Find the classification head
+        if hasattr(model, 'model') and hasattr(model.model, 'class_embed'):
+            old_head = model.model.class_embed
+            hidden_dim = old_head.in_features
+            
+            logger.info(f"   Found class_embed: {hidden_dim} → {original_num_classes + 1}")
+            
+            # Create new head with correct size
+            # Note: +1 for DETR's "no object" class
+            new_head = torch.nn.Linear(hidden_dim, new_num_classes + 1)
+            
+            # Initialize carefully to avoid NaN
+            torch.nn.init.normal_(new_head.weight, mean=0.0, std=0.01)
+            torch.nn.init.constant_(new_head.bias, -2.0)  # Favor "no object" initially
+            
+            # Replace
+            model.model.class_embed = new_head
+            
+            logger.info(f"   ✓ NEW class_embed: {hidden_dim} → {new_num_classes + 1}")
+            logger.info(f"   ✓ Initialized: normal(std=0.01), bias=-2.0")
+        else:
+            logger.warning("   ⚠️  Could not find class_embed to replace!")
+        
+        # STEP 3: Reinitialize bbox head (doesn't depend on num_classes but good practice)
+        logger.info("")
+        logger.info("Step 3: Reinitializing bbox regression head...")
+        
+        if hasattr(model, 'model') and hasattr(model.model, 'bbox_embed'):
+            bbox_embed = model.model.bbox_embed
+            
+            # Bbox embed is typically an MLP with .layers attribute
+            if hasattr(bbox_embed, 'layers'):
+                for layer in bbox_embed.layers:
+                    if isinstance(layer, torch.nn.Linear):
+                        torch.nn.init.xavier_uniform_(layer.weight, gain=0.01)
+                        if layer.bias is not None:
+                            torch.nn.init.constant_(layer.bias, 0)
+                logger.info(f"   ✓ Bbox MLP reinitialized: {len(bbox_embed.layers)} layers")
+            else:
+                logger.info("   ℹ️  Bbox embed has no .layers attribute, skipping")
+        else:
+            logger.warning("   ⚠️  Could not find bbox_embed!")
+        
+        # STEP 4: Update model config
+        logger.info("")
+        logger.info("Step 4: Updating model config...")
+        model.config.num_labels = new_num_classes
+        model.config.id2label = id2label
+        model.config.label2id = label2id
+        
+        logger.info(f"   ✓ Config updated to {new_num_classes} classes")
+        logger.info(f"   ✓ id2label: {id2label}")
+    
+    logger.info("")
+    logger.info("="*80)
+    logger.info(f"✅ MODEL READY FOR TRAINING")
+    logger.info(f"   Total parameters: {sum(p.numel() for p in model.parameters()):,}")
+    logger.info(f"   Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+    logger.info("="*80)
 
     # CRITICAL FIX: Add hooks to catch NaN in forward pass
     # Based on https://github.com/ultralytics/ultralytics/issues/7594
