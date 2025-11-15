@@ -269,23 +269,49 @@ def main():
         ]
         logger.info(f"Found {len(categories)} categories from data")
     
-    # Convert to COCO format
-    logger.info(f"\nConverting dataset to COCO format for RF-DETR...")
-    train_dir = convert_hf_to_coco_format(train_dataset, coco_dataset_dir, "train")
+    # Convert to COCO format (with caching)
+    logger.info(f"\nPreparing COCO format dataset for RF-DETR...")
     
-    if val_dataset:
-        val_dir = convert_hf_to_coco_format(val_dataset, coco_dataset_dir, "valid")
-        # RF-DETR also expects a test split - reuse validation data
-        test_dir = convert_hf_to_coco_format(val_dataset, coco_dataset_dir, "test")
+    # Check if conversion already exists
+    train_annotations = coco_dataset_dir / "train" / "_annotations.coco.json"
+    valid_annotations = coco_dataset_dir / "valid" / "_annotations.coco.json"
+    test_annotations = coco_dataset_dir / "test" / "_annotations.coco.json"
+    
+    if train_annotations.exists() and valid_annotations.exists() and test_annotations.exists():
+        logger.info("✓ COCO format dataset already exists (using cache)")
+        logger.info(f"   Directory: {coco_dataset_dir}")
+        logger.info("   To force reconversion, delete this directory and rerun")
+        
+        train_dir = coco_dataset_dir / "train"
+        val_dir = coco_dataset_dir / "valid"
+        test_dir = coco_dataset_dir / "test"
+        
+        # Load categories from existing annotations
+        with open(train_annotations) as f:
+            coco_data = json.load(f)
+            logger.info(f"   Found {len(coco_data['images'])} train images")
+            logger.info(f"   Found {len(coco_data['annotations'])} train annotations")
+            logger.info(f"   Categories: {len(categories)}")
     else:
-        logger.warning("No validation split found, using train split for validation and test")
-        val_dir = convert_hf_to_coco_format(train_dataset, coco_dataset_dir, "valid")
-        test_dir = convert_hf_to_coco_format(train_dataset, coco_dataset_dir, "test")
-    
-    logger.info(f"✓ Dataset conversion complete!")
-    logger.info(f"   COCO dataset directory: {coco_dataset_dir}")
-    logger.info(f"   Splits created: train, valid, test")
-    logger.info(f"   Categories: {categories}")
+        logger.info("Converting dataset to COCO format (this may take several minutes)...")
+        logger.info("ℹ️  This conversion will be cached for future runs")
+        
+        train_dir = convert_hf_to_coco_format(train_dataset, coco_dataset_dir, "train")
+        
+        if val_dataset:
+            val_dir = convert_hf_to_coco_format(val_dataset, coco_dataset_dir, "valid")
+            # RF-DETR also expects a test split - reuse validation data
+            test_dir = convert_hf_to_coco_format(val_dataset, coco_dataset_dir, "test")
+        else:
+            logger.warning("No validation split found, using train split for validation and test")
+            val_dir = convert_hf_to_coco_format(train_dataset, coco_dataset_dir, "valid")
+            test_dir = convert_hf_to_coco_format(train_dataset, coco_dataset_dir, "test")
+        
+        logger.info(f"✓ Dataset conversion complete!")
+        logger.info(f"   COCO dataset directory: {coco_dataset_dir}")
+        logger.info(f"   Splits created: train, valid, test")
+        logger.info(f"   Categories: {categories}")
+        logger.info(f"   ✓ Conversion cached for future runs")
     
     # Import RF-DETR
     logger.info(f"\nInitializing RF-DETR model...")
