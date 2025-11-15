@@ -23,11 +23,18 @@ import os
 import sys
 from pathlib import Path
 import shutil
+import warnings
 
 import torch
 from PIL import Image
 from datasets import load_dataset
 from tqdm.auto import tqdm
+
+# Increase PIL's decompression bomb limit for large document images
+Image.MAX_IMAGE_PIXELS = None  # Disable the limit
+
+# Suppress decompression bomb warnings (we're handling large images intentionally)
+warnings.filterwarnings('ignore', category=Image.DecompressionBombWarning)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -130,24 +137,113 @@ def convert_hf_to_coco_format(dataset, output_dir, split_name="train"):
     
     annotation_id = 1
     
+    # JPEG maximum dimension
+    MAX_JPEG_DIM = 65500
+    
+    # Check how many images are already converted
+    existing_images = list(split_dir.glob("image_*.jpg"))
+    logger.info(f"Found {len(existing_images)} existing images in {split_name}, will skip these")
+    
     # Process each sample
+    converted_count = 0
+    skipped_count = 0
+    
     for idx in tqdm(range(len(dataset)), desc=f"Converting {split_name}"):
         sample = dataset[idx]
         image = sample["image"]
         image_id = sample.get("id", idx)
         
+        # Check if this image already exists - skip if so
+        image_filename = f"image_{image_id:08d}.jpg"
+        image_path = split_dir / image_filename
+        
+        if image_path.exists():
+            # Image already converted, skip processing but still add to annotations
+            skipped_count += 1
+            
+            # Get image dimensions from existing file
+            try:
+                with Image.open(image_path) as existing_img:
+                    width, height = existing_img.size
+            except:
+                # If can't open existing, reconvert
+                pass
+            else:
+                # Add to annotations and continue
+                coco_output["images"].append({
+                    "id": image_id,
+                    "file_name": image_filename,
+                    "width": width,
+                    "height": height,
+                })
+                
+                # Add annotations for this image
+                objects = sample["objects"]
+                bboxes = objects["bbox"]
+                categories_list = objects["category"]
+                
+                for bbox, category in zip(bboxes, categories_list):
+                    x, y, w, h = bbox
+                    if w <= 0 or h <= 0:
+                        continue
+                    
+                    coco_output["annotations"].append({
+                        "id": annotation_id,
+                        "image_id": image_id,
+                        "category_id": category,
+                        "bbox": [float(x), float(y), float(w), float(h)],
+                        "area": float(w * h),
+                        "iscrowd": 0,
+                    })
+                    annotation_id += 1
+                
+                continue  # Skip to next image
+        
+        # Image doesn't exist, process it
+        converted_count += 1
+        
+        # Convert to PIL if necessary
+        if not isinstance(image, Image.Image):
+            image = Image.fromarray(image)
+        
+        width, height = image.size
+        
+        # Check if image exceeds JPEG limits and resize if needed
+        if width > MAX_JPEG_DIM or height > MAX_JPEG_DIM:
+            # Calculate scale factor to fit within JPEG limits
+            scale = min(MAX_JPEG_DIM / width, MAX_JPEG_DIM / height)
+            new_width = int(width * scale)
+            new_height = int(height * scale)
+            
+            if converted_count <= 5:  # Only log first few warnings
+                logger.warning(f"Image {image_id} too large ({width}x{height}), resizing to {new_width}x{new_height}")
+            
+            # Resize image
+            image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            
+            # Also scale bboxes
+            objects = sample["objects"]
+            scaled_bboxes = []
+            for bbox in objects["bbox"]:
+                x, y, w, h = bbox
+                scaled_bboxes.append([
+                    float(x * scale),
+                    float(y * scale),
+                    float(w * scale),
+                    float(h * scale)
+                ])
+            # Update sample with scaled bboxes
+            sample["objects"]["bbox"] = scaled_bboxes
+            
+            # Update width/height for annotations
+            width, height = new_width, new_height
+        
         # Save image
-        if isinstance(image, Image.Image):
-            width, height = image.size
-            image_filename = f"image_{image_id:08d}.jpg"
-            image_path = split_dir / image_filename
+        try:
             image.save(image_path, "JPEG", quality=95)
-        else:
-            # Handle numpy array
-            height, width = image.shape[:2]
-            image_filename = f"image_{image_id:08d}.jpg"
-            image_path = split_dir / image_filename
-            Image.fromarray(image).save(image_path, "JPEG", quality=95)
+        except Exception as e:
+            logger.error(f"Failed to save image {image_id}: {e}")
+            continue
         
         # Add to COCO images
         coco_output["images"].append({
