@@ -335,10 +335,37 @@ def main():
         raise
     
     # Save model
-    logger.info(f"\nSaving model to {args.output_dir}...")
-    model_save_path = output_dir / "rfdetr_model.pt"
-    torch.save(model.state_dict(), model_save_path)
-    logger.info(f"✓ Model weights saved to {model_save_path}")
+    logger.info(f"\nLocating trained model...")
+    
+    # RF-DETR saves its own checkpoints during training
+    # Look for checkpoint files in output directory
+    checkpoint_files = list(output_dir.glob("checkpoint*.pth")) + list(output_dir.glob("checkpoint*.pt"))
+    
+    if checkpoint_files:
+        # Use the latest checkpoint
+        model_save_path = max(checkpoint_files, key=lambda p: p.stat().st_mtime)
+        logger.info(f"✓ Found RF-DETR checkpoint: {model_save_path}")
+    else:
+        # Try to save manually
+        logger.info(f"No checkpoints found, attempting manual save...")
+        model_save_path = output_dir / "rfdetr_model.pt"
+        
+        try:
+            if hasattr(model, 'save'):
+                model.save(str(model_save_path))
+                logger.info(f"✓ Model saved using model.save()")
+            elif hasattr(model, 'model') and hasattr(model.model, 'state_dict'):
+                # Save the underlying PyTorch model
+                torch.save(model.model.state_dict(), model_save_path)
+                logger.info(f"✓ Model saved using model.model.state_dict()")
+            else:
+                # Fallback: save entire model object
+                torch.save(model, model_save_path)
+                logger.info(f"✓ Model saved as torch object")
+        except Exception as e:
+            logger.error(f"❌ Could not save model: {e}")
+            logger.warning("   Model may have been saved by RF-DETR's training loop")
+            model_save_path = None
     
     # Save model info
     model_info = {
@@ -461,14 +488,17 @@ print(predictions)
                 # Upload files
                 logger.info(f"Uploading files to {args.hub_model_id}...")
                 
-                # Upload model weights
-                api.upload_file(
-                    path_or_fileobj=str(model_save_path),
-                    path_in_repo="rfdetr_model.pt",
-                    repo_id=args.hub_model_id,
-                    token=hf_token,
-                )
-                logger.info("  ✓ Model weights uploaded")
+                # Upload model weights (if successfully saved)
+                if model_save_path and model_save_path.exists():
+                    api.upload_file(
+                        path_or_fileobj=str(model_save_path),
+                        path_in_repo="rfdetr_model.pt",
+                        repo_id=args.hub_model_id,
+                        token=hf_token,
+                    )
+                    logger.info("  ✓ Model weights uploaded")
+                else:
+                    logger.warning("  ⚠️  Model weights not uploaded (save failed)")
                 
                 # Upload model info
                 api.upload_file(
