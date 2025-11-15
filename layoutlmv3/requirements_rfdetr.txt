@@ -20,6 +20,9 @@ huggingface_hub>=0.16.0  # Required for push_to_hub
 # For COCO format
 pycocotools>=2.0.6
 
+# For evaluation metrics
+supervision>=0.16.0  # For mAP calculation
+
 # Optional: For faster training
 accelerate>=0.20.0
 
