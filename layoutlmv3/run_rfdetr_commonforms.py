@@ -275,9 +275,16 @@ def main():
     
     if val_dataset:
         val_dir = convert_hf_to_coco_format(val_dataset, coco_dataset_dir, "valid")
+        # RF-DETR also expects a test split - reuse validation data
+        test_dir = convert_hf_to_coco_format(val_dataset, coco_dataset_dir, "test")
+    else:
+        logger.warning("No validation split found, using train split for validation and test")
+        val_dir = convert_hf_to_coco_format(train_dataset, coco_dataset_dir, "valid")
+        test_dir = convert_hf_to_coco_format(train_dataset, coco_dataset_dir, "test")
     
     logger.info(f"✓ Dataset conversion complete!")
     logger.info(f"   COCO dataset directory: {coco_dataset_dir}")
+    logger.info(f"   Splits created: train, valid, test")
     logger.info(f"   Categories: {categories}")
     
     # Import RF-DETR
