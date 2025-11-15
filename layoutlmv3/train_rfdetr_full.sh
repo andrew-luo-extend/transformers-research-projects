@@ -19,9 +19,18 @@ PYTHON_BIN="${PYTHON:-python3}"
 # Configuration
 : "${HF_USERNAME:?Set HF_USERNAME to your Hugging Face username.}"
 
-MODEL_ID="${HF_MODEL_ID:-${HF_USERNAME}/rfdetr-commonforms}"
+MODEL_ID="${HF_MODEL_ID:-${HF_USERNAME}/rfdetr-commonforms}"  # Production model (no -test suffix)
 OUTPUT_DIR="${OUTPUT_DIR:-/workspace/outputs/rfdetr-commonforms}"
 CACHE_DIR="${CACHE_DIR:-/workspace/cache}"
+
+# Handle HuggingFace token
+if [[ -n "${HF_TOKEN:-}" ]]; then
+  HUB_ARGS="--push_to_hub --hub_model_id ${MODEL_ID}"
+  echo "Will push to Hub: ${MODEL_ID}"
+else
+  HUB_ARGS=""
+  echo "⚠️  HF_TOKEN not set, skipping Hub upload"
+fi
 
 # Create directories
 mkdir -p "${OUTPUT_DIR}"
@@ -30,8 +39,8 @@ mkdir -p "${CACHE_DIR}"
 # RF-DETR Training Parameters
 MODEL_SIZE="${MODEL_SIZE:-medium}"  # small, medium, or large
 EPOCHS="${EPOCHS:-30}"
-BATCH_SIZE="${BATCH_SIZE:-8}"
-GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-2}"  # batch_size × grad_accum = 16 (recommended)
+BATCH_SIZE="${BATCH_SIZE:-16}"
+GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}"  # batch_size × grad_accum = 16 (recommended)
 LEARNING_RATE="${LEARNING_RATE:-1e-4}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
 
@@ -57,6 +66,5 @@ exec "${PYTHON_BIN}" "${DIR}/run_rfdetr_commonforms.py" \
   --grad_accum_steps "${GRAD_ACCUM_STEPS}" \
   --learning_rate "${LEARNING_RATE}" \
   --num_workers "${NUM_WORKERS}" \
-  --push_to_hub \
-  --hub_model_id "${MODEL_ID}"
+  ${HUB_ARGS}
 
