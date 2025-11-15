@@ -33,7 +33,7 @@ exec "${PYTHON_BIN}" "${DIR}/run_rfdetr_commonforms.py" \
   --model_size small \
   --max_train_samples 50 \
   --max_val_samples 10 \
-  --epochs 5 \
+  --epochs 1 \
   --batch_size 4 \
   --grad_accum_steps 4 \
   --learning_rate 1e-4 \
