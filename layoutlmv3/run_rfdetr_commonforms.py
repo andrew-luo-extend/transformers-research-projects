@@ -99,7 +99,14 @@ def convert_hf_to_coco_format(dataset, output_dir, split_name="train"):
     # Get categories from dataset
     try:
         category_names = dataset.features["objects"]["category"].names
-        categories = [{"id": i, "name": name} for i, name in enumerate(category_names)]
+        categories = [
+            {
+                "id": i, 
+                "name": name,
+                "supercategory": "form_element"  # Required by RF-DETR
+            } 
+            for i, name in enumerate(category_names)
+        ]
         logger.info(f"Found {len(categories)} categories: {category_names}")
     except:
         # Fallback: extract from data
@@ -109,7 +116,14 @@ def convert_hf_to_coco_format(dataset, output_dir, split_name="train"):
             if i >= 100:
                 break
             sample_cats.update(sample["objects"]["category"])
-        categories = [{"id": i, "name": f"class_{i}"} for i in sorted(sample_cats)]
+        categories = [
+            {
+                "id": i, 
+                "name": f"class_{i}",
+                "supercategory": "form_element"  # Required by RF-DETR
+            } 
+            for i in sorted(sample_cats)
+        ]
         logger.info(f"Found {len(categories)} categories from data")
     
     coco_output["categories"] = categories
@@ -229,7 +243,14 @@ def main():
     # Extract categories for model info
     try:
         category_names = train_dataset.features["objects"]["category"].names
-        categories = [{"id": i, "name": name} for i, name in enumerate(category_names)]
+        categories = [
+            {
+                "id": i, 
+                "name": name,
+                "supercategory": "form_element"
+            } 
+            for i, name in enumerate(category_names)
+        ]
         logger.info(f"Found {len(categories)} categories: {category_names}")
     except:
         logger.warning("Could not extract category names from schema")
@@ -238,7 +259,14 @@ def main():
             if i >= 100:
                 break
             sample_cats.update(sample["objects"]["category"])
-        categories = [{"id": i, "name": f"class_{i}"} for i in sorted(sample_cats)]
+        categories = [
+            {
+                "id": i, 
+                "name": f"class_{i}",
+                "supercategory": "form_element"
+            } 
+            for i in sorted(sample_cats)
+        ]
         logger.info(f"Found {len(categories)} categories from data")
     
     # Convert to COCO format
