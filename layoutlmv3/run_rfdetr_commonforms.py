@@ -17,6 +17,7 @@ Model: RF-DETR (https://github.com/saidinesh5/rfdetr or similar)
 """
 
 import argparse
+import io
 import json
 import logging
 import os
@@ -27,6 +28,7 @@ import warnings
 
 import torch
 from PIL import Image
+from datasets import Image as DatasetImage
 from datasets import load_dataset
 from tqdm.auto import tqdm
 
@@ -144,32 +146,56 @@ def convert_hf_to_coco_format(dataset, output_dir, split_name="train"):
     existing_images = list(split_dir.glob("image_*.jpg"))
     logger.info(f"Found {len(existing_images)} existing images in {split_name}, will skip these")
     
+    # Try to avoid decoding images unless necessary
+    dataset_for_conversion = dataset
+    try:
+        dataset_for_conversion = dataset.cast_column("image", DatasetImage(decode=False))
+    except Exception as e:
+        logger.debug(f"Unable to disable image decoding for {split_name}: {e}")
+
+    def load_image_from_sample(image_data):
+        """Lazily load a PIL image in RGB mode."""
+        if isinstance(image_data, Image.Image):
+            return image_data.convert("RGB")
+        if isinstance(image_data, dict):
+            path = image_data.get("path")
+            if path and os.path.exists(path):
+                with Image.open(path) as img:
+                    return img.convert("RGB")
+            image_bytes = image_data.get("bytes")
+            if image_bytes is not None:
+                with Image.open(io.BytesIO(image_bytes)) as img:
+                    return img.convert("RGB")
+        # Fallback: assume array-like
+        return Image.fromarray(image_data).convert("RGB")
+
     # Process each sample
     converted_count = 0
     skipped_count = 0
     
-    for idx in tqdm(range(len(dataset)), desc=f"Converting {split_name}"):
-        sample = dataset[idx]
-        image = sample["image"]
+    for idx in tqdm(range(len(dataset_for_conversion)), desc=f"Converting {split_name}"):
+        sample = dataset_for_conversion[idx]
+        image_data = sample["image"]
         image_id = sample.get("id", idx)
+        objects = sample.get("objects", {})
+        raw_bboxes = list(objects.get("bbox", []))
+        categories_list = list(objects.get("category", objects.get("category_id", [])))
+        adjusted_bboxes = []
         
         # Check if this image already exists - skip if so
         image_filename = f"image_{image_id:08d}.jpg"
         image_path = split_dir / image_filename
         
         if image_path.exists():
-            # Image already converted, skip processing but still add to annotations
             skipped_count += 1
-            
-            # Get image dimensions from existing file
+            width = height = None
             try:
                 with Image.open(image_path) as existing_img:
                     width, height = existing_img.size
-            except:
-                # If can't open existing, reconvert
-                pass
-            else:
-                # Add to annotations and continue
+            except Exception:
+                width = height = None
+            
+            if width is not None and height is not None:
                 coco_output["images"].append({
                     "id": image_id,
                     "file_name": image_filename,
@@ -177,75 +203,68 @@ def convert_hf_to_coco_format(dataset, output_dir, split_name="train"):
                     "height": height,
                 })
                 
-                # Add annotations for this image
-                objects = sample["objects"]
-                bboxes = objects["bbox"]
-                categories_list = objects["category"]
-                
-                for bbox, category in zip(bboxes, categories_list):
-                    x, y, w, h = bbox
+                adjusted_bboxes = [
+                    [float(x), float(y), float(w), float(h)]
+                    for x, y, w, h in raw_bboxes
+                ]
+                for bbox_vals, category in zip(adjusted_bboxes, categories_list):
+                    x, y, w, h = bbox_vals
                     if w <= 0 or h <= 0:
                         continue
-                    
                     coco_output["annotations"].append({
                         "id": annotation_id,
                         "image_id": image_id,
                         "category_id": category,
-                        "bbox": [float(x), float(y), float(w), float(h)],
+                        "bbox": [x, y, w, h],
                         "area": float(w * h),
                         "iscrowd": 0,
                     })
                     annotation_id += 1
-                
                 continue  # Skip to next image
         
-        # Image doesn't exist, process it
+        # Image doesn't exist (or existing image unreadable), process it
         converted_count += 1
+        pil_image = load_image_from_sample(image_data)
+        orig_width, orig_height = pil_image.size
+        width, height = orig_width, orig_height
+        scale = None
         
-        # Convert to PIL if necessary
-        if not isinstance(image, Image.Image):
-            image = Image.fromarray(image)
-        
-        width, height = image.size
-        
-        # Check if image exceeds JPEG limits and resize if needed
         if width > MAX_JPEG_DIM or height > MAX_JPEG_DIM:
-            # Calculate scale factor to fit within JPEG limits
             scale = min(MAX_JPEG_DIM / width, MAX_JPEG_DIM / height)
-            new_width = int(width * scale)
-            new_height = int(height * scale)
-            
-            if converted_count <= 5:  # Only log first few warnings
+            new_width = max(1, int(width * scale))
+            new_height = max(1, int(height * scale))
+            if converted_count <= 5:
                 logger.warning(f"Image {image_id} too large ({width}x{height}), resizing to {new_width}x{new_height}")
-            
-            # Resize image
-            image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-            
-            # Also scale bboxes
-            objects = sample["objects"]
-            scaled_bboxes = []
-            for bbox in objects["bbox"]:
+            pil_image = pil_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            width, height = pil_image.size
+        
+        if scale is not None:
+            adjusted_bboxes = []
+            for bbox in raw_bboxes:
                 x, y, w, h = bbox
-                scaled_bboxes.append([
+                adjusted_bboxes.append([
                     float(x * scale),
                     float(y * scale),
                     float(w * scale),
                     float(h * scale)
                 ])
-            # Update sample with scaled bboxes
-            sample["objects"]["bbox"] = scaled_bboxes
-            
-            # Update width/height for annotations
-            width, height = new_width, new_height
+        else:
+            adjusted_bboxes = [
+                [float(x), float(y), float(w), float(h)]
+                for x, y, w, h in raw_bboxes
+            ]
         
-        # Save image
         try:
-            image.save(image_path, "JPEG", quality=95)
+            pil_image.save(image_path, "JPEG", quality=95)
         except Exception as e:
             logger.error(f"Failed to save image {image_id}: {e}")
+            if hasattr(pil_image, "close"):
+                pil_image.close()
             continue
+        finally:
+            if hasattr(pil_image, "close"):
+                pil_image.close()
         
-        # Add to COCO images
         coco_output["images"].append({
             "id": image_id,
             "file_name": image_filename,
@@ -253,23 +272,15 @@ def convert_hf_to_coco_format(dataset, output_dir, split_name="train"):
             "height": height,
         })
         
-        # Add annotations
-        objects = sample["objects"]
-        bboxes = objects["bbox"]
-        categories_list = objects["category"]
-        
-        for bbox, category in zip(bboxes, categories_list):
-            x, y, w, h = bbox
-            
-            # Skip invalid boxes
+        for bbox_vals, category in zip(adjusted_bboxes, categories_list):
+            x, y, w, h = bbox_vals
             if w <= 0 or h <= 0:
                 continue
-            
             coco_output["annotations"].append({
                 "id": annotation_id,
                 "image_id": image_id,
                 "category_id": category,
-                "bbox": [float(x), float(y), float(w), float(h)],  # COCO format: [x, y, w, h]
+                "bbox": [x, y, w, h],
                 "area": float(w * h),
                 "iscrowd": 0,
             })
@@ -670,4 +681,3 @@ print(predictions)
 
 if __name__ == "__main__":
     main()
-
