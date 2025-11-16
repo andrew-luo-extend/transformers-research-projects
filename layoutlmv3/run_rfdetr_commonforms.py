@@ -187,7 +187,7 @@ def convert_hf_to_coco_format(dataset, output_dir, split_name="train"):
         image_path = split_dir / image_filename
         
         if image_path.exists():
-             skipped_count += 1
+            skipped_count += 1
             width = height = None
             try:
                 with Image.open(image_path) as existing_img:
