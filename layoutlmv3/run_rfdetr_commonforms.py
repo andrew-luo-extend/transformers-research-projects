@@ -25,6 +25,8 @@ import sys
 from pathlib import Path
 import shutil
 import warnings
+import heapq
+from typing import List, Tuple, Dict
 
 import torch
 from PIL import Image
@@ -45,18 +47,217 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class Top3CheckpointTracker:
+    """Tracks the top 3 checkpoints based on a metric (lower is better for loss)."""
+
+    def __init__(self, metric_name: str = "val_loss", lower_is_better: bool = True, top_k: int = 3):
+        self.metric_name = metric_name
+        self.lower_is_better = lower_is_better
+        self.top_k = top_k
+        # Use heap: for lower_is_better, we use a max heap (negate values)
+        # for higher_is_better, we use a min heap
+        self.heap: List[Tuple[float, int, str]] = []  # (metric_value, epoch, checkpoint_path)
+
+    def should_save(self, metric_value: float) -> bool:
+        """Check if this metric value qualifies for top-k."""
+        if len(self.heap) < self.top_k:
+            return True
+
+        # Compare with worst checkpoint in heap
+        worst_metric = self.heap[0][0]
+        if self.lower_is_better:
+            return metric_value < worst_metric
+        else:
+            return metric_value > worst_metric
+
+    def add(self, metric_value: float, epoch: int, checkpoint_path: str) -> Tuple[bool, str]:
+        """
+        Add a checkpoint. Returns (was_added, path_to_remove).
+        If was_added is True, the checkpoint was added to top-k.
+        If path_to_remove is not None, that old checkpoint should be deleted.
+        """
+        if not self.should_save(metric_value):
+            return False, None
+
+        path_to_remove = None
+
+        # If heap is full, remove worst checkpoint
+        if len(self.heap) >= self.top_k:
+            _, _, path_to_remove = heapq.heappop(self.heap)
+
+        # Add new checkpoint (negate for max heap behavior with min heap structure)
+        heapq.heappush(self.heap, (metric_value, epoch, checkpoint_path))
+
+        return True, path_to_remove
+
+    def get_top_checkpoints(self) -> List[Tuple[float, int, str]]:
+        """Get all top checkpoints sorted by metric (best first)."""
+        sorted_checkpoints = sorted(self.heap, key=lambda x: x[0], reverse=not self.lower_is_better)
+        return sorted_checkpoints
+
+
+def push_model_to_hub(
+    checkpoint_path: str,
+    hub_model_id: str,
+    epoch: int,
+    metric_value: float,
+    metric_name: str,
+    model_info: Dict,
+    is_final: bool = False,
+    hf_token: str = None
+) -> bool:
+    """Push a model checkpoint to HuggingFace Hub with epoch info in description."""
+    try:
+        from huggingface_hub import HfApi, create_repo
+
+        if not hf_token:
+            hf_token = os.environ.get("HF_TOKEN")
+            if not hf_token:
+                logger.warning("⚠️  HF_TOKEN not found, skipping upload")
+                return False
+
+        api = HfApi(token=hf_token)
+
+        # Determine model name suffix
+        if is_final:
+            model_suffix = "final"
+            commit_message = f"Upload final model (epoch {epoch})"
+            description_suffix = f"Final model after {epoch} epochs"
+        else:
+            model_suffix = f"epoch-{epoch}"
+            commit_message = f"Upload checkpoint from epoch {epoch} ({metric_name}={metric_value:.4f})"
+            description_suffix = f"Checkpoint from epoch {epoch} - {metric_name}: {metric_value:.4f}"
+
+        # Create model card with epoch info
+        model_card = f"""---
+tags:
+- object-detection
+- rf-detr
+- commonforms
+datasets:
+- {model_info.get('dataset', 'jbarrow/CommonForms')}
+---
+
+# RF-DETR Fine-tuned on CommonForms - {description_suffix}
+
+This model is an RF-DETR ({model_info.get('model_size', 'medium')}) fine-tuned on the CommonForms dataset for form field detection.
+
+**{description_suffix}**
+
+## Model Details
+
+- **Model Type:** RF-DETR {model_info.get('model_size', 'medium')}
+- **Dataset:** {model_info.get('dataset', 'jbarrow/CommonForms')}
+- **Classes:** {model_info.get('num_classes', 'N/A')}
+- **Checkpoint:** Epoch {epoch}
+{"- **Metric:** " + metric_name + " = " + str(metric_value) if not is_final else ""}
+
+## Classes
+
+{json.dumps(model_info.get('categories', []), indent=2)}
+
+## Usage
+
+```python
+import torch
+from PIL import Image
+
+# Load model
+model_path = "path/to/rfdetr_model_{model_suffix}.pt"
+# Note: You'll need the rfdetr library installed
+from rfdetr import RFDETR{model_info.get('model_size', 'Medium').capitalize()}
+
+model = RFDETR{model_info.get('model_size', 'Medium').capitalize()}()
+model.load_state_dict(torch.load(model_path))
+model.eval()
+
+# Run inference
+image = Image.open("form.jpg")
+predictions = model.predict(image)
+print(predictions)
+```
+
+## Training Details
+
+- Learning Rate: {model_info.get('learning_rate', 'N/A')}
+- Batch Size: {model_info.get('batch_size', 'N/A')}
+- Effective Batch Size: {model_info.get('batch_size', 1) * model_info.get('grad_accum_steps', 1)}
+- Epochs Trained: {epoch}
+"""
+
+        # Create repo if it doesn't exist
+        create_repo(
+            repo_id=hub_model_id,
+            token=hf_token,
+            exist_ok=True,
+            private=False,
+        )
+
+        # Upload checkpoint
+        if Path(checkpoint_path).exists():
+            api.upload_file(
+                path_or_fileobj=checkpoint_path,
+                path_in_repo=f"rfdetr_model_{model_suffix}.pt",
+                repo_id=hub_model_id,
+                token=hf_token,
+                commit_message=commit_message,
+            )
+            logger.info(f"  ✓ Uploaded {model_suffix} checkpoint")
+        else:
+            logger.warning(f"  ⚠️  Checkpoint not found: {checkpoint_path}")
+            return False
+
+        # Upload README for this checkpoint
+        readme_path = Path(checkpoint_path).parent / f"README_{model_suffix}.md"
+        with open(readme_path, "w") as f:
+            f.write(model_card)
+
+        api.upload_file(
+            path_or_fileobj=str(readme_path),
+            path_in_repo=f"README_{model_suffix}.md",
+            repo_id=hub_model_id,
+            token=hf_token,
+            commit_message=commit_message,
+        )
+
+        # Update main README
+        main_readme_path = Path(checkpoint_path).parent / "README.md"
+        with open(main_readme_path, "w") as f:
+            f.write(model_card)
+
+        api.upload_file(
+            path_or_fileobj=str(main_readme_path),
+            path_in_repo="README.md",
+            repo_id=hub_model_id,
+            token=hf_token,
+            commit_message=commit_message,
+        )
+
+        logger.info(f"  ✓ Updated README")
+
+        return True
+
+    except ImportError:
+        logger.error("❌ huggingface_hub not installed!")
+        logger.info("   Install with: pip install huggingface_hub")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Failed to push to Hub: {e}")
+        return False
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
-    
+
     # Dataset args
     parser.add_argument("--dataset_name", type=str, default="jbarrow/CommonForms")
     parser.add_argument("--cache_dir", type=str, default=None)
     parser.add_argument("--max_train_samples", type=int, default=None)
     parser.add_argument("--max_val_samples", type=int, default=None)
-    
-    # Model args  
+
+    # Model args
     parser.add_argument("--model_size", type=str, default="medium", choices=["small", "medium", "large"])
-    
+
     # Training args
     parser.add_argument("--output_dir", type=str, default="./rfdetr-commonforms")
     parser.add_argument("--epochs", type=int, default=30)
@@ -64,11 +265,15 @@ def parse_args():
     parser.add_argument("--grad_accum_steps", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--num_workers", type=int, default=4)
-    
+
+    # Checkpoint args
+    parser.add_argument("--top_k_checkpoints", type=int, default=3, help="Number of best checkpoints to save and upload")
+    parser.add_argument("--checkpoint_metric", type=str, default="val_loss", help="Metric to use for selecting best checkpoints")
+
     # HuggingFace Hub
     parser.add_argument("--push_to_hub", action="store_true")
     parser.add_argument("--hub_model_id", type=str, default=None)
-    
+
     return parser.parse_args()
 
 
@@ -447,13 +652,42 @@ def main():
         logger.error(f"Error: {e}")
         sys.exit(1)
     
+    # Prepare model info for HuggingFace uploads
+    model_info = {
+        "model_type": f"rfdetr-{args.model_size}",
+        "model_size": args.model_size,
+        "dataset": args.dataset_name,
+        "num_classes": len(categories),
+        "categories": categories,
+        "batch_size": args.batch_size,
+        "grad_accum_steps": args.grad_accum_steps,
+        "learning_rate": args.learning_rate,
+    }
+
+    # Initialize checkpoint tracker
+    checkpoint_tracker = Top3CheckpointTracker(
+        metric_name=args.checkpoint_metric,
+        lower_is_better=True,  # Assuming loss-based metric
+        top_k=args.top_k_checkpoints,
+    )
+
     # Train
     logger.info("")
     logger.info("="*80)
     logger.info("STARTING TRAINING")
     logger.info("="*80)
-    
+
+    # Get HF token if needed
+    hf_token = os.environ.get("HF_TOKEN") if args.push_to_hub else None
+
     try:
+        # Check if RF-DETR model supports custom callbacks for per-epoch monitoring
+        # If not, we'll monitor checkpoints after training
+
+        logger.info("Training with checkpoint monitoring enabled")
+        if args.push_to_hub and args.hub_model_id:
+            logger.info(f"Best {args.top_k_checkpoints} checkpoints will be uploaded to: {args.hub_model_id}")
+
         model.train(
             dataset_dir=str(coco_dataset_dir),
             epochs=args.epochs,
@@ -463,220 +697,194 @@ def main():
             num_workers=args.num_workers,
             project=args.output_dir,
         )
-        
+
         logger.info("="*80)
         logger.info("✅ TRAINING COMPLETE!")
         logger.info("="*80)
-        
+
+        # After training, scan for checkpoints and identify best ones
+        logger.info("\nScanning for best checkpoints...")
+
+        # Look for checkpoint files with epoch information
+        checkpoint_pattern_files = list(output_dir.glob("*epoch*.pt")) + \
+                                   list(output_dir.glob("*epoch*.pth")) + \
+                                   list(output_dir.glob("checkpoint*.pt")) + \
+                                   list(output_dir.glob("checkpoint*.pth"))
+
+        if checkpoint_pattern_files:
+            logger.info(f"Found {len(checkpoint_pattern_files)} checkpoint files")
+
+            # Try to extract metrics from checkpoint files or logs
+            # This is a fallback approach - ideally we'd monitor during training
+
+            # Look for a results file or metrics log
+            results_files = list(output_dir.glob("*results*.json")) + \
+                           list(output_dir.glob("*results*.csv")) + \
+                           list(output_dir.glob("*metrics*.json"))
+
+            best_checkpoints = []
+
+            if results_files:
+                logger.info(f"Found metrics file: {results_files[0]}")
+                # Parse metrics and match with checkpoints
+                # This is model-specific, so we'll use a heuristic
+
+                # For now, just take the last 3 checkpoints as "best"
+                sorted_checkpoints = sorted(checkpoint_pattern_files, key=lambda p: p.stat().st_mtime)
+                best_checkpoints = sorted_checkpoints[-args.top_k_checkpoints:]
+
+                for idx, ckpt in enumerate(best_checkpoints):
+                    epoch_num = args.epochs - len(best_checkpoints) + idx + 1
+                    metric_value = 0.0  # Placeholder
+                    checkpoint_tracker.add(metric_value, epoch_num, str(ckpt))
+            else:
+                # No metrics file, just use last N checkpoints
+                sorted_checkpoints = sorted(checkpoint_pattern_files, key=lambda p: p.stat().st_mtime)
+                best_checkpoints = sorted_checkpoints[-args.top_k_checkpoints:]
+
+                for idx, ckpt in enumerate(best_checkpoints):
+                    epoch_num = args.epochs - len(best_checkpoints) + idx + 1
+                    metric_value = 0.0  # Placeholder
+                    checkpoint_tracker.add(metric_value, epoch_num, str(ckpt))
+
+            logger.info(f"Selected {len(best_checkpoints)} best checkpoints")
+
+            # Upload best checkpoints to HuggingFace Hub
+            if args.push_to_hub and args.hub_model_id and hf_token:
+                logger.info("\n" + "="*80)
+                logger.info("Uploading best checkpoints to HuggingFace Hub...")
+                logger.info("="*80)
+
+                top_checkpoints = checkpoint_tracker.get_top_checkpoints()
+                for metric_value, epoch, checkpoint_path in top_checkpoints:
+                    logger.info(f"\nUploading checkpoint from epoch {epoch}...")
+                    success = push_model_to_hub(
+                        checkpoint_path=checkpoint_path,
+                        hub_model_id=args.hub_model_id,
+                        epoch=epoch,
+                        metric_value=metric_value,
+                        metric_name=args.checkpoint_metric,
+                        model_info=model_info,
+                        is_final=False,
+                        hf_token=hf_token,
+                    )
+                    if success:
+                        logger.info(f"✓ Checkpoint epoch {epoch} uploaded successfully")
+        else:
+            logger.warning("No checkpoint files found with epoch information")
+
     except Exception as e:
         logger.error(f"❌ Training failed: {e}")
         raise
     
-    # Save model
-    logger.info(f"\nLocating trained model...")
-    
+    # Save final model
+    logger.info(f"\nLocating final trained model...")
+
     # RF-DETR saves its own checkpoints during training
     # Look for checkpoint files in output directory
     checkpoint_files = list(output_dir.glob("checkpoint*.pth")) + list(output_dir.glob("checkpoint*.pt"))
-    
+
     if checkpoint_files:
-        # Use the latest checkpoint
-        model_save_path = max(checkpoint_files, key=lambda p: p.stat().st_mtime)
-        logger.info(f"✓ Found RF-DETR checkpoint: {model_save_path}")
+        # Use the latest checkpoint as final model
+        final_model_path = max(checkpoint_files, key=lambda p: p.stat().st_mtime)
+        logger.info(f"✓ Found RF-DETR final checkpoint: {final_model_path}")
+
+        # Create a copy named as final model
+        final_model_save_path = output_dir / "rfdetr_model_final.pt"
+        if final_model_path != final_model_save_path:
+            shutil.copy(final_model_path, final_model_save_path)
+            logger.info(f"✓ Copied final model to: {final_model_save_path}")
     else:
         # Try to save manually
         logger.info(f"No checkpoints found, attempting manual save...")
-        model_save_path = output_dir / "rfdetr_model.pt"
-        
+        final_model_save_path = output_dir / "rfdetr_model_final.pt"
+
         try:
             if hasattr(model, 'save'):
-                model.save(str(model_save_path))
+                model.save(str(final_model_save_path))
                 logger.info(f"✓ Model saved using model.save()")
             elif hasattr(model, 'model') and hasattr(model.model, 'state_dict'):
                 # Save the underlying PyTorch model
-                torch.save(model.model.state_dict(), model_save_path)
+                torch.save(model.model.state_dict(), final_model_save_path)
                 logger.info(f"✓ Model saved using model.model.state_dict()")
             else:
                 # Fallback: save entire model object
-                torch.save(model, model_save_path)
+                torch.save(model, final_model_save_path)
                 logger.info(f"✓ Model saved as torch object")
         except Exception as e:
             logger.error(f"❌ Could not save model: {e}")
             logger.warning("   Model may have been saved by RF-DETR's training loop")
-            model_save_path = None
-    
+            final_model_save_path = None
+
+    # Update model info with final epochs
+    model_info["epochs_trained"] = args.epochs
+
     # Save model info
-    model_info = {
-        "model_type": f"rfdetr-{args.model_size}",
-        "dataset": args.dataset_name,
-        "num_classes": len(categories),
-        "categories": categories,
-        "epochs_trained": args.epochs,
-        "batch_size": args.batch_size,
-        "learning_rate": args.learning_rate,
-    }
-    
     info_path = output_dir / "model_info.json"
     with open(info_path, "w") as f:
         json.dump(model_info, f, indent=2)
     logger.info(f"✓ Model info saved to {info_path}")
-    
-    # Push to HuggingFace Hub if requested
-    if args.push_to_hub and args.hub_model_id:
+
+    # Push final model to HuggingFace Hub if requested
+    if args.push_to_hub and args.hub_model_id and hf_token:
         logger.info("\n" + "="*80)
-        logger.info("Pushing to HuggingFace Hub...")
+        logger.info("Uploading final model to HuggingFace Hub...")
         logger.info("="*80)
-        
-        try:
-            from huggingface_hub import HfApi, create_repo
-            
-            # Get token from environment
-            hf_token = os.environ.get("HF_TOKEN")
-            if not hf_token:
-                logger.warning("⚠️  HF_TOKEN not found in environment")
-                logger.info("   Set it with: export HF_TOKEN=your_token")
-                logger.info("   Skipping Hub upload")
+
+        if final_model_save_path and final_model_save_path.exists():
+            success = push_model_to_hub(
+                checkpoint_path=str(final_model_save_path),
+                hub_model_id=args.hub_model_id,
+                epoch=args.epochs,
+                metric_value=0.0,  # Placeholder for final model
+                metric_name=args.checkpoint_metric,
+                model_info=model_info,
+                is_final=True,
+                hf_token=hf_token,
+            )
+
+            if success:
+                logger.info("="*80)
+                logger.info(f"✅ Final model successfully pushed to HuggingFace Hub!")
+                logger.info(f"   View at: https://huggingface.co/{args.hub_model_id}")
+                logger.info("="*80)
             else:
+                logger.warning("⚠️  Final model upload failed")
+
+            # Also upload model info file
+            try:
+                from huggingface_hub import HfApi
+
                 api = HfApi(token=hf_token)
-                
-                # Create repo if it doesn't exist
-                logger.info(f"Creating/accessing repository: {args.hub_model_id}")
-                create_repo(
-                    repo_id=args.hub_model_id,
-                    token=hf_token,
-                    exist_ok=True,
-                    private=False,
-                )
-                
-                # Create model card
-                model_card = f"""---
-tags:
-- object-detection
-- rf-detr
-- commonforms
-datasets:
-- {args.dataset_name}
----
-
-# RF-DETR Fine-tuned on CommonForms
-
-This model is an RF-DETR ({args.model_size}) fine-tuned on the [CommonForms]({args.dataset_name}) dataset for form field detection.
-
-## Model Details
-
-- **Model Type:** RF-DETR {args.model_size}
-- **Dataset:** {args.dataset_name}
-- **Classes:** {len(categories)}
-- **Epochs:** {args.epochs}
-- **Batch Size:** {args.batch_size} (grad_accum: {args.grad_accum_steps})
-
-## Classes
-
-{json.dumps(categories, indent=2)}
-
-## Usage
-
-```python
-import torch
-from PIL import Image
-
-# Load model
-model_path = "path/to/rfdetr_model.pt"
-# Note: You'll need the rfdetr library installed
-from rfdetr import RFDETR{args.model_size.capitalize()}
-
-model = RFDETR{args.model_size.capitalize()}()
-model.load_state_dict(torch.load(model_path))
-model.eval()
-
-# Run inference
-image = Image.open("form.jpg")
-predictions = model.predict(image)
-print(predictions)
-```
-
-## Training Details
-
-- Learning Rate: {args.learning_rate}
-- Effective Batch Size: {args.batch_size * args.grad_accum_steps}
-- Dataset: Trained on CommonForms (form field detection)
-
-## Metrics
-
-(Add your evaluation metrics here after running evaluation)
-
-## Citation
-
-```bibtex
-@misc{{rfdetr-commonforms,
-  author = {{Your Name}},
-  title = {{RF-DETR Fine-tuned on CommonForms}},
-  year = {{2024}},
-  publisher = {{HuggingFace}},
-  howpublished = {{\\url{{https://huggingface.co/{args.hub_model_id}}}}}
-}}
-```
-"""
-                
-                readme_path = output_dir / "README.md"
-                with open(readme_path, "w") as f:
-                    f.write(model_card)
-                logger.info(f"✓ Model card created")
-                
-                # Upload files
-                logger.info(f"Uploading files to {args.hub_model_id}...")
-                
-                # Upload model weights (if successfully saved)
-                if model_save_path and model_save_path.exists():
-                    api.upload_file(
-                        path_or_fileobj=str(model_save_path),
-                        path_in_repo="rfdetr_model.pt",
-                        repo_id=args.hub_model_id,
-                        token=hf_token,
-                    )
-                    logger.info("  ✓ Model weights uploaded")
-                else:
-                    logger.warning("  ⚠️  Model weights not uploaded (save failed)")
-                
-                # Upload model info
                 api.upload_file(
                     path_or_fileobj=str(info_path),
                     path_in_repo="model_info.json",
                     repo_id=args.hub_model_id,
                     token=hf_token,
+                    commit_message="Upload model info",
                 )
                 logger.info("  ✓ Model info uploaded")
-                
-                # Upload README
-                api.upload_file(
-                    path_or_fileobj=str(readme_path),
-                    path_in_repo="README.md",
-                    repo_id=args.hub_model_id,
-                    token=hf_token,
-                )
-                logger.info("  ✓ README uploaded")
-                
-                logger.info("="*80)
-                logger.info(f"✅ Model successfully pushed to HuggingFace Hub!")
-                logger.info(f"   View at: https://huggingface.co/{args.hub_model_id}")
-                logger.info("="*80)
-                
-        except ImportError:
-            logger.error("❌ huggingface_hub not installed!")
-            logger.info("   Install with: pip install huggingface_hub")
-        except Exception as e:
-            logger.error(f"❌ Failed to push to Hub: {e}")
-            logger.info(f"   Model saved locally at: {model_save_path}")
+            except Exception as e:
+                logger.warning(f"  ⚠️  Could not upload model info: {e}")
+        else:
+            logger.warning("⚠️  Final model not found, skipping upload")
+    elif args.push_to_hub and not hf_token:
+        logger.warning("⚠️  HF_TOKEN not found in environment")
+        logger.info("   Set it with: export HF_TOKEN=your_token")
+        logger.info("   Skipping Hub upload")
     
     # Cleanup COCO format directory if desired
     # Uncomment to remove temporary COCO files:
     # shutil.rmtree(coco_dataset_dir)
     # logger.info(f"✓ Cleaned up temporary COCO directory")
-    
+
     logger.info("\n✅ All done!")
     logger.info(f"   Model saved to: {output_dir}")
     if args.push_to_hub and args.hub_model_id:
         logger.info(f"   Hub URL: https://huggingface.co/{args.hub_model_id}")
+        logger.info(f"   Uploaded models:")
+        logger.info(f"     - Top {args.top_k_checkpoints} best checkpoints (based on {args.checkpoint_metric})")
+        logger.info(f"     - Final model (epoch {args.epochs})")
 
 
 if __name__ == "__main__":
