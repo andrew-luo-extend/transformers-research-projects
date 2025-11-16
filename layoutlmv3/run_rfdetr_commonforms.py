@@ -695,7 +695,9 @@ def main():
             grad_accum_steps=args.grad_accum_steps,
             lr=args.learning_rate,
             num_workers=args.num_workers,
-            project=args.output_dir,
+            output_dir=args.output_dir,
+            tensorboard=True,
+            early_stopping=True,
         )
 
         logger.info("="*80)
