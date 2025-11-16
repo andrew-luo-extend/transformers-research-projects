@@ -22,6 +22,8 @@ import json
 import logging
 import os
 import sys
+import subprocess
+import signal
 from pathlib import Path
 import shutil
 import warnings
@@ -671,11 +673,92 @@ def main():
         top_k=args.top_k_checkpoints,
     )
 
+    # Start TensorBoard if available
+    def start_tensorboard(logdir, port=6006):
+        """Start TensorBoard in the background for monitoring training."""
+        try:
+            # Check if TensorBoard is available
+            result = subprocess.run(
+                ["which", "tensorboard"],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                logger.warning("TensorBoard not found in PATH, skipping TensorBoard startup")
+                return None
+            
+            # Kill any existing TensorBoard on the port
+            try:
+                # Find process using the port
+                result = subprocess.run(
+                    ["lsof", "-ti", f":{port}"],
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    pids = result.stdout.strip().split('\n')
+                    for pid in pids:
+                        try:
+                            os.kill(int(pid), signal.SIGKILL)
+                            logger.info(f"Killed existing TensorBoard process (PID: {pid})")
+                        except (ProcessLookupError, ValueError):
+                            pass
+            except (FileNotFoundError, subprocess.SubprocessError):
+                # lsof might not be available, try alternative method
+                try:
+                    result = subprocess.run(
+                        ["fuser", "-k", f"{port}/tcp"],
+                        capture_output=True,
+                        text=True
+                    )
+                except FileNotFoundError:
+                    pass  # fuser also not available, continue anyway
+            
+            # Start TensorBoard in background
+            logdir_path = Path(logdir)
+            logdir_path.mkdir(parents=True, exist_ok=True)
+            
+            logger.info(f"Starting TensorBoard on port {port}...")
+            logger.info(f"  Log directory: {logdir_path}")
+            logger.info(f"  Access via RunPod HTTP Services on port {port}")
+            
+            # Start TensorBoard as a background process
+            process = subprocess.Popen(
+                [
+                    "tensorboard",
+                    "--logdir", str(logdir_path),
+                    "--host", "0.0.0.0",
+                    "--port", str(port),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                preexec_fn=os.setsid  # Create new process group
+            )
+            
+            logger.info(f"✓ TensorBoard started with PID {process.pid}")
+            return process
+            
+        except Exception as e:
+            logger.warning(f"Failed to start TensorBoard: {e}")
+            logger.info("  Training will continue without TensorBoard")
+            return None
+    
     # Train
     logger.info("")
     logger.info("="*80)
     logger.info("STARTING TRAINING")
     logger.info("="*80)
+
+    # Start TensorBoard before training
+    tensorboard_process = None
+    try:
+        tensorboard_process = start_tensorboard(
+            logdir=str(output_dir),
+            port=6006
+        )
+    except Exception as e:
+        logger.warning(f"Could not start TensorBoard: {e}")
+        logger.info("Training will continue without TensorBoard")
 
     # Get HF token if needed
     hf_token = os.environ.get("HF_TOKEN") if args.push_to_hub else None
@@ -777,7 +860,23 @@ def main():
 
     except Exception as e:
         logger.error(f"❌ Training failed: {e}")
+        # Clean up TensorBoard on error
+        if tensorboard_process:
+            try:
+                os.killpg(os.getpgid(tensorboard_process.pid), signal.SIGTERM)
+                logger.info("Stopped TensorBoard process")
+            except (ProcessLookupError, OSError):
+                pass
         raise
+    finally:
+        # Clean up TensorBoard when done
+        if tensorboard_process:
+            try:
+                logger.info("Stopping TensorBoard...")
+                os.killpg(os.getpgid(tensorboard_process.pid), signal.SIGTERM)
+                logger.info("✓ TensorBoard stopped")
+            except (ProcessLookupError, OSError):
+                pass
     
     # Save final model
     logger.info(f"\nLocating final trained model...")
