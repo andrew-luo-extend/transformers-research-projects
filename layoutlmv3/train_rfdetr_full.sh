@@ -40,10 +40,10 @@ mkdir -p "${CACHE_DIR}"
 # RF-DETR Training Parameters
 MODEL_SIZE="${MODEL_SIZE:-medium}"  # small, medium, or large
 EPOCHS="${EPOCHS:-30}"
-BATCH_SIZE="${BATCH_SIZE:-32}"  # H200: Start with 24, can increase to 32 if no OOM
+BATCH_SIZE="${BATCH_SIZE:-24}"  # H200: Start with 24, can increase to 32 if no OOM
 GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}"  # batch_size × grad_accum = effective batch size
 LEARNING_RATE="${LEARNING_RATE:-1e-4}"
-NUM_WORKERS="${NUM_WORKERS:-8}"
+NUM_WORKERS="${NUM_WORKERS:-12}"
  
 
 echo "=========================================="
