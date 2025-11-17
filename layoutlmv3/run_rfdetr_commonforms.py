@@ -27,7 +27,6 @@ import signal
 from pathlib import Path
 import shutil
 import warnings
-import heapq
 from typing import List, Tuple, Dict
 
 import torch
@@ -49,66 +48,13 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class Top3CheckpointTracker:
-    """Tracks the top 3 checkpoints based on a metric (lower is better for loss)."""
-
-    def __init__(self, metric_name: str = "val_loss", lower_is_better: bool = True, top_k: int = 3):
-        self.metric_name = metric_name
-        self.lower_is_better = lower_is_better
-        self.top_k = top_k
-        # Use heap: for lower_is_better, we use a max heap (negate values)
-        # for higher_is_better, we use a min heap
-        self.heap: List[Tuple[float, int, str]] = []  # (metric_value, epoch, checkpoint_path)
-
-    def should_save(self, metric_value: float) -> bool:
-        """Check if this metric value qualifies for top-k."""
-        if len(self.heap) < self.top_k:
-            return True
-
-        # Compare with worst checkpoint in heap
-        worst_metric = self.heap[0][0]
-        if self.lower_is_better:
-            return metric_value < worst_metric
-        else:
-            return metric_value > worst_metric
-
-    def add(self, metric_value: float, epoch: int, checkpoint_path: str) -> Tuple[bool, str]:
-        """
-        Add a checkpoint. Returns (was_added, path_to_remove).
-        If was_added is True, the checkpoint was added to top-k.
-        If path_to_remove is not None, that old checkpoint should be deleted.
-        """
-        if not self.should_save(metric_value):
-            return False, None
-
-        path_to_remove = None
-
-        # If heap is full, remove worst checkpoint
-        if len(self.heap) >= self.top_k:
-            _, _, path_to_remove = heapq.heappop(self.heap)
-
-        # Add new checkpoint (negate for max heap behavior with min heap structure)
-        heapq.heappush(self.heap, (metric_value, epoch, checkpoint_path))
-
-        return True, path_to_remove
-
-    def get_top_checkpoints(self) -> List[Tuple[float, int, str]]:
-        """Get all top checkpoints sorted by metric (best first)."""
-        sorted_checkpoints = sorted(self.heap, key=lambda x: x[0], reverse=not self.lower_is_better)
-        return sorted_checkpoints
-
-
-def push_model_to_hub(
+def push_final_model_to_hub(
     checkpoint_path: str,
     hub_model_id: str,
-    epoch: int,
-    metric_value: float,
-    metric_name: str,
     model_info: Dict,
-    is_final: bool = False,
     hf_token: str = None
 ) -> bool:
-    """Push a model checkpoint to HuggingFace Hub with epoch info in description."""
+    """Push the final trained model to HuggingFace Hub."""
     try:
         from huggingface_hub import HfApi, create_repo
 
@@ -120,17 +66,9 @@ def push_model_to_hub(
 
         api = HfApi(token=hf_token)
 
-        # Determine model name suffix
-        if is_final:
-            model_suffix = "final"
-            commit_message = f"Upload final model (epoch {epoch})"
-            description_suffix = f"Final model after {epoch} epochs"
-        else:
-            model_suffix = f"epoch-{epoch}"
-            commit_message = f"Upload checkpoint from epoch {epoch} ({metric_name}={metric_value:.4f})"
-            description_suffix = f"Checkpoint from epoch {epoch} - {metric_name}: {metric_value:.4f}"
-
-        # Create model card with epoch info
+        # Create model card
+        commit_message = "Upload final trained model"
+        description_suffix = f"Final model after training"
         model_card = f"""---
 tags:
 - object-detection
@@ -151,8 +89,6 @@ This model is an RF-DETR ({model_info.get('model_size', 'medium')}) fine-tuned o
 - **Model Type:** RF-DETR {model_info.get('model_size', 'medium')}
 - **Dataset:** {model_info.get('dataset', 'jbarrow/CommonForms')}
 - **Classes:** {model_info.get('num_classes', 'N/A')}
-- **Checkpoint:** Epoch {epoch}
-{"- **Metric:** " + metric_name + " = " + str(metric_value) if not is_final else ""}
 
 ## Classes
 
@@ -165,12 +101,12 @@ import torch
 from PIL import Image
 
 # Load model
-model_path = "path/to/rfdetr_model_{model_suffix}.pt"
 # Note: You'll need the rfdetr library installed
 from rfdetr import RFDETR{model_info.get('model_size', 'Medium').capitalize()}
 
 model = RFDETR{model_info.get('model_size', 'Medium').capitalize()}()
-model.load_state_dict(torch.load(model_path))
+# Load from checkpoint
+model.load_state_dict(torch.load("path/to/checkpoint.pt"))
 model.eval()
 
 # Run inference
@@ -184,7 +120,7 @@ print(predictions)
 - Learning Rate: {model_info.get('learning_rate', 'N/A')}
 - Batch Size: {model_info.get('batch_size', 'N/A')}
 - Effective Batch Size: {model_info.get('batch_size', 1) * model_info.get('grad_accum_steps', 1)}
-- Epochs Trained: {epoch}
+- Epochs Trained: {model_info.get('epochs_trained', 'N/A')}
 """
 
         # Create repo if it doesn't exist
@@ -195,40 +131,27 @@ print(predictions)
             private=False,
         )
 
-        # Upload checkpoint
+        # Upload model checkpoint
         if Path(checkpoint_path).exists():
             api.upload_file(
                 path_or_fileobj=checkpoint_path,
-                path_in_repo=f"rfdetr_model_{model_suffix}.pt",
+                path_in_repo="rfdetr_model.pt",
                 repo_id=hub_model_id,
                 token=hf_token,
                 commit_message=commit_message,
             )
-            logger.info(f"  ✓ Uploaded {model_suffix} checkpoint")
+            logger.info(f"  ✓ Uploaded model checkpoint")
         else:
             logger.warning(f"  ⚠️  Checkpoint not found: {checkpoint_path}")
             return False
 
-        # Upload README for this checkpoint
-        readme_path = Path(checkpoint_path).parent / f"README_{model_suffix}.md"
+        # Upload README
+        readme_path = Path(checkpoint_path).parent / "README.md"
         with open(readme_path, "w") as f:
             f.write(model_card)
 
         api.upload_file(
             path_or_fileobj=str(readme_path),
-            path_in_repo=f"README_{model_suffix}.md",
-            repo_id=hub_model_id,
-            token=hf_token,
-            commit_message=commit_message,
-        )
-
-        # Update main README
-        main_readme_path = Path(checkpoint_path).parent / "README.md"
-        with open(main_readme_path, "w") as f:
-            f.write(model_card)
-
-        api.upload_file(
-            path_or_fileobj=str(main_readme_path),
             path_in_repo="README.md",
             repo_id=hub_model_id,
             token=hf_token,
@@ -267,10 +190,6 @@ def parse_args():
     parser.add_argument("--grad_accum_steps", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--num_workers", type=int, default=4)
-
-    # Checkpoint args
-    parser.add_argument("--top_k_checkpoints", type=int, default=3, help="Number of best checkpoints to save and upload")
-    parser.add_argument("--checkpoint_metric", type=str, default="val_loss", help="Metric to use for selecting best checkpoints")
 
     # HuggingFace Hub
     parser.add_argument("--push_to_hub", action="store_true")
@@ -666,13 +585,6 @@ def main():
         "learning_rate": args.learning_rate,
     }
 
-    # Initialize checkpoint tracker
-    checkpoint_tracker = Top3CheckpointTracker(
-        metric_name=args.checkpoint_metric,
-        lower_is_better=True,  # Assuming loss-based metric
-        top_k=args.top_k_checkpoints,
-    )
-
     # Start TensorBoard if available
     def start_tensorboard(logdir, port=6006):
         """Start TensorBoard in the background for monitoring training."""
@@ -718,9 +630,15 @@ def main():
             logdir_path = Path(logdir)
             logdir_path.mkdir(parents=True, exist_ok=True)
             
+            # Check for existing event files
+            event_files = list(logdir_path.glob("events.out.tfevents.*"))
+            if event_files:
+                logger.info(f"Found {len(event_files)} existing TensorBoard event files")
+            
             logger.info(f"Starting TensorBoard on port {port}...")
             logger.info(f"  Log directory: {logdir_path}")
             logger.info(f"  Access via RunPod HTTP Services on port {port}")
+            logger.info(f"  Note: If you see 'No dashboards', wait for training to write new event data")
             
             # Start TensorBoard as a background process
             process = subprocess.Popen(
@@ -750,10 +668,19 @@ def main():
     logger.info("="*80)
 
     # Start TensorBoard before training
+    # RF-DETR may write logs directly to output_dir or to a subdirectory
+    # Try both the output_dir and a runs subdirectory
+    tensorboard_logdir = output_dir
+    # Check if there's a runs subdirectory (common pattern)
+    runs_dir = output_dir / "runs"
+    if runs_dir.exists():
+        tensorboard_logdir = runs_dir
+        logger.info(f"Found runs/ subdirectory, using it for TensorBoard")
+    
     tensorboard_process = None
     try:
         tensorboard_process = start_tensorboard(
-            logdir=str(output_dir),
+            logdir=str(tensorboard_logdir),
             port=6006
         )
     except Exception as e:
@@ -764,12 +691,24 @@ def main():
     hf_token = os.environ.get("HF_TOKEN") if args.push_to_hub else None
 
     try:
-        # Check if RF-DETR model supports custom callbacks for per-epoch monitoring
-        # If not, we'll monitor checkpoints after training
-
-        logger.info("Training with checkpoint monitoring enabled")
+        logger.info("Starting training...")
         if args.push_to_hub and args.hub_model_id:
-            logger.info(f"Best {args.top_k_checkpoints} checkpoints will be uploaded to: {args.hub_model_id}")
+            logger.info(f"Final model will be uploaded to: {args.hub_model_id}")
+
+        # Ensure TensorBoard log directory exists
+        # RF-DETR may write logs to output_dir or a subdirectory
+        tensorboard_log_path = Path(tensorboard_logdir)
+        tensorboard_log_path.mkdir(parents=True, exist_ok=True)
+        logger.info(f"TensorBoard log directory: {tensorboard_log_path}")
+        logger.info(f"  Event files will appear here during training")
+
+        # RF-DETR's train() method - tensorboard=True enables logging
+        # The logs are typically written to output_dir or a subdirectory
+        # We'll monitor the output_dir for event files
+        logger.info(f"Starting training with TensorBoard logging enabled")
+        logger.info(f"  RF-DETR will write logs to: {args.output_dir}")
+        logger.info(f"  TensorBoard is monitoring: {tensorboard_log_path}")
+        logger.info(f"  If logs appear elsewhere, check subdirectories in {args.output_dir}")
 
         model.train(
             dataset_dir=str(coco_dataset_dir),
@@ -786,77 +725,7 @@ def main():
         logger.info("="*80)
         logger.info("✅ TRAINING COMPLETE!")
         logger.info("="*80)
-
-        # After training, scan for checkpoints and identify best ones
-        logger.info("\nScanning for best checkpoints...")
-
-        # Look for checkpoint files with epoch information
-        checkpoint_pattern_files = list(output_dir.glob("*epoch*.pt")) + \
-                                   list(output_dir.glob("*epoch*.pth")) + \
-                                   list(output_dir.glob("checkpoint*.pt")) + \
-                                   list(output_dir.glob("checkpoint*.pth"))
-
-        if checkpoint_pattern_files:
-            logger.info(f"Found {len(checkpoint_pattern_files)} checkpoint files")
-
-            # Try to extract metrics from checkpoint files or logs
-            # This is a fallback approach - ideally we'd monitor during training
-
-            # Look for a results file or metrics log
-            results_files = list(output_dir.glob("*results*.json")) + \
-                           list(output_dir.glob("*results*.csv")) + \
-                           list(output_dir.glob("*metrics*.json"))
-
-            best_checkpoints = []
-
-            if results_files:
-                logger.info(f"Found metrics file: {results_files[0]}")
-                # Parse metrics and match with checkpoints
-                # This is model-specific, so we'll use a heuristic
-
-                # For now, just take the last 3 checkpoints as "best"
-                sorted_checkpoints = sorted(checkpoint_pattern_files, key=lambda p: p.stat().st_mtime)
-                best_checkpoints = sorted_checkpoints[-args.top_k_checkpoints:]
-
-                for idx, ckpt in enumerate(best_checkpoints):
-                    epoch_num = args.epochs - len(best_checkpoints) + idx + 1
-                    metric_value = 0.0  # Placeholder
-                    checkpoint_tracker.add(metric_value, epoch_num, str(ckpt))
-            else:
-                # No metrics file, just use last N checkpoints
-                sorted_checkpoints = sorted(checkpoint_pattern_files, key=lambda p: p.stat().st_mtime)
-                best_checkpoints = sorted_checkpoints[-args.top_k_checkpoints:]
-
-                for idx, ckpt in enumerate(best_checkpoints):
-                    epoch_num = args.epochs - len(best_checkpoints) + idx + 1
-                    metric_value = 0.0  # Placeholder
-                    checkpoint_tracker.add(metric_value, epoch_num, str(ckpt))
-
-            logger.info(f"Selected {len(best_checkpoints)} best checkpoints")
-
-            # Upload best checkpoints to HuggingFace Hub
-            if args.push_to_hub and args.hub_model_id and hf_token:
-                logger.info("\n" + "="*80)
-                logger.info("Uploading best checkpoints to HuggingFace Hub...")
-                logger.info("="*80)
-
-                top_checkpoints = checkpoint_tracker.get_top_checkpoints()
-                for metric_value, epoch, checkpoint_path in top_checkpoints:
-                    logger.info(f"\nUploading checkpoint from epoch {epoch}...")
-                    success = push_model_to_hub(
-                        checkpoint_path=checkpoint_path,
-                        hub_model_id=args.hub_model_id,
-                        epoch=epoch,
-                        metric_value=metric_value,
-                        metric_name=args.checkpoint_metric,
-                        model_info=model_info,
-                        is_final=False,
-                        hf_token=hf_token,
-                    )
-                    if success:
-                        logger.info(f"✓ Checkpoint epoch {epoch} uploaded successfully")
-        else:
-            logger.warning("No checkpoint files found with epoch information")
+        logger.info("RF-DETR has saved checkpoints during training to the output directory")
 
     except Exception as e:
         logger.error(f"❌ Training failed: {e}")
@@ -917,7 +786,7 @@ def main():
             logger.warning("   Model may have been saved by RF-DETR's training loop")
             final_model_save_path = None
 
-    # Update model info with final epochs
+    # Update model info
     model_info["epochs_trained"] = args.epochs
 
     # Save model info
@@ -933,14 +802,10 @@ def main():
         logger.info("="*80)
 
         if final_model_save_path and final_model_save_path.exists():
-            success = push_model_to_hub(
+            success = push_final_model_to_hub(
                 checkpoint_path=str(final_model_save_path),
                 hub_model_id=args.hub_model_id,
-                epoch=args.epochs,
-                metric_value=0.0,  # Placeholder for final model
-                metric_name=args.checkpoint_metric,
                 model_info=model_info,
-                is_final=True,
                 hf_token=hf_token,
             )
 
@@ -983,9 +848,7 @@ def main():
     logger.info(f"   Model saved to: {output_dir}")
     if args.push_to_hub and args.hub_model_id:
         logger.info(f"   Hub URL: https://huggingface.co/{args.hub_model_id}")
-        logger.info(f"   Uploaded models:")
-        logger.info(f"     - Top {args.top_k_checkpoints} best checkpoints (based on {args.checkpoint_metric})")
-        logger.info(f"     - Final model (epoch {args.epochs})")
+        logger.info(f"   Final model uploaded to Hub")
 
 
 if __name__ == "__main__":

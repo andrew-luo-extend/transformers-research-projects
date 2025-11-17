@@ -6,7 +6,8 @@
 # Recommended batch_size × grad_accum_steps = 16 for optimal training
 #
 # GPU Recommendations:
-#   H100/A100: batch_size=16, grad_accum_steps=1
+#   H200:      batch_size=24-32, grad_accum_steps=1 (141GB VRAM)
+#   H100/A100: batch_size=16, grad_accum_steps=1 (80GB VRAM)
 #   L40S:      batch_size=8,  grad_accum_steps=2
 #   T4:        batch_size=4,  grad_accum_steps=4
 #
@@ -39,10 +40,11 @@ mkdir -p "${CACHE_DIR}"
 # RF-DETR Training Parameters
 MODEL_SIZE="${MODEL_SIZE:-medium}"  # small, medium, or large
 EPOCHS="${EPOCHS:-30}"
-BATCH_SIZE="${BATCH_SIZE:-16}"
-GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}"  # batch_size × grad_accum = 16 (recommended)
+BATCH_SIZE="${BATCH_SIZE:-24}"  # H200: Start with 24, can increase to 32 if no OOM
+GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}"  # batch_size × grad_accum = effective batch size
 LEARNING_RATE="${LEARNING_RATE:-1e-4}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
+ 
 
 echo "=========================================="
 echo "RF-DETR Training on CommonForms"
@@ -67,4 +69,3 @@ exec "${PYTHON_BIN}" "${DIR}/run_rfdetr_commonforms.py" \
   --learning_rate "${LEARNING_RATE}" \
   --num_workers "${NUM_WORKERS}" \
   ${HUB_ARGS}
-
