@@ -638,15 +638,19 @@ def main():
             logger.info(f"Starting TensorBoard on port {port}...")
             logger.info(f"  Log directory: {logdir_path}")
             logger.info(f"  Access via RunPod HTTP Services on port {port}")
-            logger.info(f"  Note: If you see 'No dashboards', wait for training to write new event data")
+            logger.info(f"  Auto-reload: Every 5 seconds")
+            logger.info(f"  Note: Dashboard will appear once training starts logging metrics (after a few steps)")
             
             # Start TensorBoard as a background process
+            # Add reload_interval to auto-refresh when new data arrives
             process = subprocess.Popen(
                 [
                     "tensorboard",
                     "--logdir", str(logdir_path),
                     "--host", "0.0.0.0",
                     "--port", str(port),
+                    "--reload_interval", "5",  # Reload every 5 seconds
+                    "--reload_multifile", "true",  # Watch for multiple event files
                 ],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
