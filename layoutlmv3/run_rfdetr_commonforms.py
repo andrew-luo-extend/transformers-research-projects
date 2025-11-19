@@ -655,7 +655,7 @@ def main():
     if checkpoint_path:
         logger.info(f"\nLoading checkpoint weights...")
         try:
-            checkpoint_data = torch.load(checkpoint_path, map_location='cpu')
+            checkpoint_data = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
 
             # Handle different checkpoint formats
             # Some checkpoints are raw state_dicts, others are wrapped in a dict
