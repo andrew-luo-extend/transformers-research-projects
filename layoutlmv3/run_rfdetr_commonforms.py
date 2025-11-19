@@ -171,6 +171,60 @@ print(predictions)
         return False
 
 
+def find_latest_ema_checkpoint(output_dir):
+    """
+    Find the latest EMA checkpoint in the output directory.
+
+    Looks for checkpoints in this priority order:
+    1. checkpoint_ema.pt / checkpoint_ema.pth (latest EMA checkpoint)
+    2. checkpoint_best_ema.pt / checkpoint_best_ema.pth (best EMA checkpoint)
+    3. checkpoint_best_total.pt / checkpoint_best_total.pth (best overall)
+    4. Most recent checkpoint*.pt / checkpoint*.pth file
+
+    Args:
+        output_dir: Directory to search for checkpoints
+
+    Returns:
+        Path to the latest checkpoint, or None if no checkpoints found
+    """
+    output_path = Path(output_dir)
+
+    if not output_path.exists():
+        logger.warning(f"Output directory does not exist: {output_dir}")
+        return None
+
+    # Priority list of checkpoint names to look for
+    priority_checkpoints = [
+        "checkpoint_ema.pt",
+        "checkpoint_ema.pth",
+        "checkpoint_best_ema.pt",
+        "checkpoint_best_ema.pth",
+        "checkpoint_best_total.pt",
+        "checkpoint_best_total.pth",
+        "checkpoint_best.pt",
+        "checkpoint_best.pth",
+    ]
+
+    # Check for priority checkpoints first
+    for checkpoint_name in priority_checkpoints:
+        checkpoint_path = output_path / checkpoint_name
+        if checkpoint_path.exists():
+            logger.info(f"Found priority checkpoint: {checkpoint_path}")
+            return str(checkpoint_path)
+
+    # If no priority checkpoint found, look for any checkpoint file
+    checkpoint_files = list(output_path.glob("checkpoint*.pt")) + list(output_path.glob("checkpoint*.pth"))
+
+    if checkpoint_files:
+        # Sort by modification time, most recent first
+        latest_checkpoint = max(checkpoint_files, key=lambda p: p.stat().st_mtime)
+        logger.info(f"Found latest checkpoint by modification time: {latest_checkpoint}")
+        return str(latest_checkpoint)
+
+    logger.warning(f"No checkpoint files found in {output_dir}")
+    return None
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
 
@@ -194,6 +248,11 @@ def parse_args():
     # HuggingFace Hub
     parser.add_argument("--push_to_hub", action="store_true")
     parser.add_argument("--hub_model_id", type=str, default=None)
+
+    # Resume training
+    parser.add_argument("--resume_from_checkpoint", type=str, default=None,
+                       help="Path to checkpoint file to resume from (e.g., checkpoint_ema.pt). "
+                            "Use 'auto' to automatically find the latest EMA checkpoint.")
 
     return parser.parse_args()
 
@@ -555,23 +614,91 @@ def main():
     logger.info(f"\nInitializing RF-DETR model...")
     try:
         from rfdetr import RFDETRSmall, RFDETRMedium, RFDETRLarge
-        
+
         model_classes = {
             "small": RFDETRSmall,
             "medium": RFDETRMedium,
             "large": RFDETRLarge,
         }
-        
+
         ModelClass = model_classes[args.model_size]
         model = ModelClass()
-        
+
         logger.info(f"✓ RF-DETR {args.model_size} initialized")
-        
+
     except ImportError as e:
         logger.error("❌ RF-DETR not installed!")
         logger.error("Install with: pip install rfdetr")
         logger.error(f"Error: {e}")
         sys.exit(1)
+
+    # Handle checkpoint resumption
+    checkpoint_path = None
+    if args.resume_from_checkpoint:
+        if args.resume_from_checkpoint.lower() == "auto":
+            # Automatically find the latest EMA checkpoint
+            logger.info(f"\nSearching for latest checkpoint in {args.output_dir}...")
+            checkpoint_path = find_latest_ema_checkpoint(args.output_dir)
+            if checkpoint_path:
+                logger.info(f"✓ Auto-detected checkpoint: {checkpoint_path}")
+            else:
+                logger.warning("⚠️  No checkpoint found for auto-resume. Starting from scratch.")
+        else:
+            # Use the provided checkpoint path
+            checkpoint_path = args.resume_from_checkpoint
+            if not Path(checkpoint_path).exists():
+                logger.error(f"❌ Checkpoint not found: {checkpoint_path}")
+                sys.exit(1)
+            logger.info(f"✓ Will resume from checkpoint: {checkpoint_path}")
+
+    # Load checkpoint if we have one
+    if checkpoint_path:
+        logger.info(f"\nLoading checkpoint weights...")
+        try:
+            checkpoint_data = torch.load(checkpoint_path, map_location='cpu')
+
+            # Handle different checkpoint formats
+            # Some checkpoints are raw state_dicts, others are wrapped in a dict
+            if isinstance(checkpoint_data, dict):
+                if 'model' in checkpoint_data:
+                    state_dict = checkpoint_data['model']
+                elif 'state_dict' in checkpoint_data:
+                    state_dict = checkpoint_data['state_dict']
+                elif 'model_state_dict' in checkpoint_data:
+                    state_dict = checkpoint_data['model_state_dict']
+                else:
+                    # Assume the dict itself is the state dict
+                    state_dict = checkpoint_data
+            else:
+                state_dict = checkpoint_data
+
+            # Load into model
+            if hasattr(model, 'model') and hasattr(model.model, 'load_state_dict'):
+                # RF-DETR wraps the actual model
+                model.model.load_state_dict(state_dict, strict=False)
+            elif hasattr(model, 'load_state_dict'):
+                model.load_state_dict(state_dict, strict=False)
+            else:
+                logger.error("❌ Unable to load checkpoint: model has no load_state_dict method")
+                sys.exit(1)
+
+            logger.info("✓ Checkpoint loaded successfully!")
+            logger.info(f"  Resuming training from: {Path(checkpoint_path).name}")
+
+            # Log additional checkpoint info if available
+            if isinstance(checkpoint_data, dict):
+                if 'epoch' in checkpoint_data:
+                    logger.info(f"  Checkpoint epoch: {checkpoint_data['epoch']}")
+                if 'best_metric' in checkpoint_data:
+                    logger.info(f"  Best metric: {checkpoint_data['best_metric']:.4f}")
+                if 'ema' in checkpoint_data:
+                    logger.info(f"  EMA checkpoint: Yes")
+
+        except Exception as e:
+            logger.error(f"❌ Failed to load checkpoint: {e}")
+            logger.error("   Starting training from scratch instead")
+            import traceback
+            traceback.print_exc()
     
     # Prepare model info for HuggingFace uploads
     model_info = {

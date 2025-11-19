@@ -44,6 +44,12 @@ BATCH_SIZE="${BATCH_SIZE:-24}"  # H200: Start with 24, can increase to 32 if no 
 GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}"  # batch_size × grad_accum = effective batch size
 LEARNING_RATE="${LEARNING_RATE:-1e-4}"
 NUM_WORKERS="${NUM_WORKERS:-12}"
+
+# Checkpoint resumption
+# Set to "auto" to automatically find the latest EMA checkpoint
+# Set to a specific path like "/workspace/outputs/rfdetr-commonforms/checkpoint_ema.pt"
+# Leave empty to start from scratch
+RESUME_CHECKPOINT="${RESUME_CHECKPOINT:-}"
  
 
 echo "=========================================="
@@ -56,6 +62,11 @@ echo "Gradient accumulation: ${GRAD_ACCUM_STEPS}"
 echo "Effective batch size: $((BATCH_SIZE * GRAD_ACCUM_STEPS))"
 echo "Learning rate: ${LEARNING_RATE}"
 echo "Output: ${OUTPUT_DIR}"
+if [[ -n "${RESUME_CHECKPOINT}" ]]; then
+  echo "Resume checkpoint: ${RESUME_CHECKPOINT}"
+else
+  echo "Resume checkpoint: None (training from scratch)"
+fi
 echo "=========================================="
 
 exec "${PYTHON_BIN}" "${DIR}/run_rfdetr_commonforms.py" \
@@ -68,4 +79,5 @@ exec "${PYTHON_BIN}" "${DIR}/run_rfdetr_commonforms.py" \
   --grad_accum_steps "${GRAD_ACCUM_STEPS}" \
   --learning_rate "${LEARNING_RATE}" \
   --num_workers "${NUM_WORKERS}" \
+  ${RESUME_CHECKPOINT:+--resume_from_checkpoint "${RESUME_CHECKPOINT}"} \
   ${HUB_ARGS}
