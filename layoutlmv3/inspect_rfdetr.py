@@ -1,24 +1,31 @@
+#!/usr/bin/env python
+"""Quick script to inspect RF-DETR model structure and methods."""
 
-import inspect
-import torch
-try:
-    import rfdetr
-    from rfdetr import RFDETRMedium
-    
-    print("RFDETR version:", getattr(rfdetr, "__version__", "unknown"))
-    print("RFDETR file:", rfdetr.__file__)
-    
-    print("\nRFDETRMedium.train signature:")
-    print(inspect.signature(RFDETRMedium.train))
-    
-    print("\nRFDETRMedium.train docstring:")
-    print(RFDETRMedium.train.__doc__)
-    
-    # Check if we can see source
-    # print("\nRFDETRMedium.train source:")
-    # print(inspect.getsource(RFDETRMedium.train))
+from rfdetr import RFDETRMedium
 
-except ImportError:
-    print("rfdetr not installed")
-except Exception as e:
-    print(f"Error: {e}")
+model = RFDETRMedium()
+
+print("RF-DETR Model Attributes:")
+print("=" * 60)
+for attr in dir(model):
+    if not attr.startswith('_'):
+        print(f"  {attr}")
+
+print("\n" + "=" * 60)
+print("Checking for common loading methods:")
+print("=" * 60)
+print(f"  hasattr(model, 'load_state_dict'): {hasattr(model, 'load_state_dict')}")
+print(f"  hasattr(model, 'model'): {hasattr(model, 'model')}")
+print(f"  hasattr(model, 'load'): {hasattr(model, 'load')}")
+print(f"  hasattr(model, 'load_weights'): {hasattr(model, 'load_weights')}")
+print(f"  hasattr(model, 'from_pretrained'): {hasattr(model, 'from_pretrained')}")
+
+if hasattr(model, 'model'):
+    print(f"\n  model.model type: {type(model.model)}")
+    print(f"  hasattr(model.model, 'load_state_dict'): {hasattr(model.model, 'load_state_dict')}")
+
+print("\n" + "=" * 60)
+print("Model type and structure:")
+print("=" * 60)
+print(f"  Type: {type(model)}")
+print(f"  MRO: {[c.__name__ for c in type(model).__mro__]}")

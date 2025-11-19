@@ -633,72 +633,24 @@ def main():
         sys.exit(1)
 
     # Handle checkpoint resumption
-    checkpoint_path = None
+    resume_checkpoint_path = None
     if args.resume_from_checkpoint:
         if args.resume_from_checkpoint.lower() == "auto":
             # Automatically find the latest EMA checkpoint
             logger.info(f"\nSearching for latest checkpoint in {args.output_dir}...")
-            checkpoint_path = find_latest_ema_checkpoint(args.output_dir)
-            if checkpoint_path:
-                logger.info(f"✓ Auto-detected checkpoint: {checkpoint_path}")
+            resume_checkpoint_path = find_latest_ema_checkpoint(args.output_dir)
+            if resume_checkpoint_path:
+                logger.info(f"✓ Auto-detected checkpoint: {resume_checkpoint_path}")
+                logger.info(f"  Will resume training from: {Path(resume_checkpoint_path).name}")
             else:
                 logger.warning("⚠️  No checkpoint found for auto-resume. Starting from scratch.")
         else:
             # Use the provided checkpoint path
-            checkpoint_path = args.resume_from_checkpoint
-            if not Path(checkpoint_path).exists():
-                logger.error(f"❌ Checkpoint not found: {checkpoint_path}")
+            resume_checkpoint_path = args.resume_from_checkpoint
+            if not Path(resume_checkpoint_path).exists():
+                logger.error(f"❌ Checkpoint not found: {resume_checkpoint_path}")
                 sys.exit(1)
-            logger.info(f"✓ Will resume from checkpoint: {checkpoint_path}")
-
-    # Load checkpoint if we have one
-    if checkpoint_path:
-        logger.info(f"\nLoading checkpoint weights...")
-        try:
-            checkpoint_data = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-
-            # Handle different checkpoint formats
-            # Some checkpoints are raw state_dicts, others are wrapped in a dict
-            if isinstance(checkpoint_data, dict):
-                if 'model' in checkpoint_data:
-                    state_dict = checkpoint_data['model']
-                elif 'state_dict' in checkpoint_data:
-                    state_dict = checkpoint_data['state_dict']
-                elif 'model_state_dict' in checkpoint_data:
-                    state_dict = checkpoint_data['model_state_dict']
-                else:
-                    # Assume the dict itself is the state dict
-                    state_dict = checkpoint_data
-            else:
-                state_dict = checkpoint_data
-
-            # Load into model
-            if hasattr(model, 'model') and hasattr(model.model, 'load_state_dict'):
-                # RF-DETR wraps the actual model
-                model.model.load_state_dict(state_dict, strict=False)
-            elif hasattr(model, 'load_state_dict'):
-                model.load_state_dict(state_dict, strict=False)
-            else:
-                logger.error("❌ Unable to load checkpoint: model has no load_state_dict method")
-                sys.exit(1)
-
-            logger.info("✓ Checkpoint loaded successfully!")
-            logger.info(f"  Resuming training from: {Path(checkpoint_path).name}")
-
-            # Log additional checkpoint info if available
-            if isinstance(checkpoint_data, dict):
-                if 'epoch' in checkpoint_data:
-                    logger.info(f"  Checkpoint epoch: {checkpoint_data['epoch']}")
-                if 'best_metric' in checkpoint_data:
-                    logger.info(f"  Best metric: {checkpoint_data['best_metric']:.4f}")
-                if 'ema' in checkpoint_data:
-                    logger.info(f"  EMA checkpoint: Yes")
-
-        except Exception as e:
-            logger.error(f"❌ Failed to load checkpoint: {e}")
-            logger.error("   Starting training from scratch instead")
-            import traceback
-            traceback.print_exc()
+            logger.info(f"✓ Will resume from checkpoint: {resume_checkpoint_path}")
     
     # Prepare model info for HuggingFace uploads
     model_info = {
@@ -841,17 +793,25 @@ def main():
         logger.info(f"  TensorBoard is monitoring: {tensorboard_log_path}")
         logger.info(f"  If logs appear elsewhere, check subdirectories in {args.output_dir}")
 
-        model.train(
-            dataset_dir=str(coco_dataset_dir),
-            epochs=args.epochs,
-            batch_size=args.batch_size,
-            grad_accum_steps=args.grad_accum_steps,
-            lr=args.learning_rate,
-            num_workers=args.num_workers,
-            output_dir=args.output_dir,
-            tensorboard=True,
-            early_stopping=True,
-        )
+        # Build train() arguments
+        train_kwargs = {
+            "dataset_dir": str(coco_dataset_dir),
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "grad_accum_steps": args.grad_accum_steps,
+            "lr": args.learning_rate,
+            "num_workers": args.num_workers,
+            "output_dir": args.output_dir,
+            "tensorboard": True,
+            "early_stopping": True,
+        }
+
+        # Add resume parameter if checkpoint is specified
+        if resume_checkpoint_path:
+            train_kwargs["resume"] = resume_checkpoint_path
+            logger.info(f"  Resume parameter set to: {resume_checkpoint_path}")
+
+        model.train(**train_kwargs)
 
         logger.info("="*80)
         logger.info("✅ TRAINING COMPLETE!")
