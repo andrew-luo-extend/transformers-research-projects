@@ -278,9 +278,11 @@ def main():
         
         ModelClass = model_classes[args.model_size]
         model = ModelClass(pretrain_weights=checkpoint_path)
-        model.optimize_for_inference()
-        
-        logger.info(f"✓ Model loaded and optimized for inference")
+
+        # Skip optimize_for_inference() - it can fail with TorchScript tracing errors
+        # model.optimize_for_inference()
+
+        logger.info(f"✓ Model loaded successfully")
         
     except ImportError:
         logger.error("❌ RF-DETR not installed!")
