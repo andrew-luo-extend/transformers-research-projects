@@ -85,8 +85,14 @@ def parse_args():
     parser.add_argument(
         "--hub_model_id",
         type=str,
-        required=True,
+        default=None,
         help="HuggingFace model ID (e.g., your-username/rfdetr-commonforms)"
+    )
+    parser.add_argument(
+        "--checkpoint_path",
+        type=str,
+        default=None,
+        help="Path to local checkpoint file (e.g., checkpoint_best_ema.pth)"
     )
     parser.add_argument(
         "--dataset_name",
@@ -239,13 +245,25 @@ def main():
     logger.info("="*80)
     logger.info("RF-DETR Evaluation on CommonForms")
     logger.info("="*80)
-    logger.info(f"Model: {args.hub_model_id}")
+
+    # Determine checkpoint path
+    if args.checkpoint_path:
+        checkpoint_path = args.checkpoint_path
+        if not Path(checkpoint_path).exists():
+            logger.error(f"❌ Checkpoint file not found: {checkpoint_path}")
+            sys.exit(1)
+        logger.info(f"Using local checkpoint: {checkpoint_path}")
+    elif args.hub_model_id:
+        logger.info(f"Model: {args.hub_model_id}")
+        # Download model from Hub
+        checkpoint_path = download_model_from_hub(args.hub_model_id, args.cache_dir)
+    else:
+        logger.error("❌ Must specify either --checkpoint_path or --hub_model_id")
+        sys.exit(1)
+
     logger.info(f"Dataset: {args.dataset_name} ({args.test_split} split)")
     logger.info(f"Output: {args.output_dir}")
     logger.info("="*80)
-    
-    # Download model from Hub
-    checkpoint_path = download_model_from_hub(args.hub_model_id, args.cache_dir)
     
     # Load RF-DETR model
     logger.info(f"\nLoading RF-DETR {args.model_size} model...")

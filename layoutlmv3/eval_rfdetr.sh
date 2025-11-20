@@ -1,14 +1,11 @@
 #!/usr/bin/env bash
 #
-# Evaluate RF-DETR model on CommonForms test split
+# Evaluate RF-DETR checkpoint on test set
 #
 # Usage:
-#   ./eval_rfdetr.sh
-#
-# Environment Variables:
-#   HF_USERNAME  - Your HuggingFace username (required)
-#   HF_TOKEN     - Your HuggingFace token (optional, for private models)
-#   CACHE_DIR    - Cache directory (default: /workspace/cache)
+#   ./eval_rfdetr.sh                           # Auto-detect checkpoint and dataset
+#   CHECKPOINT=path/to/checkpoint.pth ./eval_rfdetr.sh
+#   SPLIT=valid ./eval_rfdetr.sh              # Evaluate on validation set
 #
 
 set -euo pipefail
@@ -17,51 +14,36 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON_BIN="${PYTHON:-python3}"
 
 # Configuration
-: "${HF_USERNAME:?Set HF_USERNAME to your Hugging Face username.}"
-
-MODEL_ID="${HF_MODEL_ID:-${HF_USERNAME}/rfdetr-commonforms}"
-CACHE_DIR="${CACHE_DIR:-/workspace/cache}"
-OUTPUT_DIR="${OUTPUT_DIR:-./eval_results_rfdetr}"
-
-# Evaluation settings
-DATASET_NAME="${DATASET_NAME:-jbarrow/CommonForms}"
-TEST_SPLIT="${TEST_SPLIT:-test}"
+OUTPUT_DIR="${OUTPUT_DIR:-/workspace/outputs/rfdetr-commonforms}"
 MODEL_SIZE="${MODEL_SIZE:-medium}"
-MAX_SAMPLES="${MAX_SAMPLES:-}"  # Empty = evaluate all
-THRESHOLD="${THRESHOLD:-0.0}"  # 0.0 for mAP calculation
-
-mkdir -p "${OUTPUT_DIR}"
+SPLIT="${SPLIT:-test}"  # test, valid, or train
+CHECKPOINT="${CHECKPOINT:-}"  # Optional: specify checkpoint path
 
 echo "=========================================="
 echo "RF-DETR Evaluation"
 echo "=========================================="
-echo "Model: ${MODEL_ID}"
-echo "Dataset: ${DATASET_NAME}"
-echo "Split: ${TEST_SPLIT}"
+echo "Output directory: ${OUTPUT_DIR}"
 echo "Model size: ${MODEL_SIZE}"
-if [[ -n "${MAX_SAMPLES}" ]]; then
-  echo "Max samples: ${MAX_SAMPLES}"
+echo "Split: ${SPLIT}"
+if [[ -n "${CHECKPOINT}" ]]; then
+  echo "Checkpoint: ${CHECKPOINT}"
 else
-  echo "Max samples: ALL (full evaluation)"
+  echo "Checkpoint: Auto-detect best EMA checkpoint"
 fi
-echo "Output: ${OUTPUT_DIR}"
 echo "=========================================="
+echo ""
 
-# Build command
-CMD="${PYTHON_BIN} ${DIR}/evaluate_rfdetr.py \
-  --hub_model_id ${MODEL_ID} \
-  --dataset_name ${DATASET_NAME} \
-  --test_split ${TEST_SPLIT} \
-  --cache_dir ${CACHE_DIR} \
-  --output_dir ${OUTPUT_DIR} \
+# Build evaluation command
+EVAL_SCRIPT="${DIR}/eval_rfdetr.py"
+EVAL_ARGS="--output_dir ${OUTPUT_DIR} \
   --model_size ${MODEL_SIZE} \
-  --threshold ${THRESHOLD}"
+  --split ${SPLIT}"
 
-# Add max_samples if set
-if [[ -n "${MAX_SAMPLES}" ]]; then
-  CMD="${CMD} --max_samples ${MAX_SAMPLES}"
+if [[ -n "${CHECKPOINT}" ]]; then
+  EVAL_ARGS="${EVAL_ARGS} --checkpoint_path ${CHECKPOINT}"
 fi
 
-# Execute
-exec ${CMD}
-
+# Run evaluation
+echo "Running evaluation..."
+echo ""
+exec "${PYTHON_BIN}" "${EVAL_SCRIPT}" ${EVAL_ARGS}
