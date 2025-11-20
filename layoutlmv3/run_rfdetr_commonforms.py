@@ -244,6 +244,8 @@ def parse_args():
     parser.add_argument("--grad_accum_steps", type=int, default=1)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--val_interval", type=int, default=1,
+                       help="Run validation every N epochs (default: 1 = every epoch)")
 
     # HuggingFace Hub
     parser.add_argument("--push_to_hub", action="store_true")
@@ -802,6 +804,7 @@ def main():
             "lr": args.learning_rate,
             "num_workers": args.num_workers,
             "output_dir": args.output_dir,
+            "val_interval": args.val_interval,
             "tensorboard": True,
             "early_stopping": True,
         }

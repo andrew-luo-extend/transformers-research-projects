@@ -44,6 +44,7 @@ BATCH_SIZE="${BATCH_SIZE:-24}"  # H200: Start with 24, can increase to 32 if no 
 GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}"  # batch_size × grad_accum = effective batch size
 LEARNING_RATE="${LEARNING_RATE:-1e-4}"
 NUM_WORKERS="${NUM_WORKERS:-12}"
+VAL_INTERVAL="${VAL_INTERVAL:-1}"  # Run validation every N epochs (1 = every epoch)
 
 # Checkpoint resumption
 # Set to "auto" to automatically find the latest EMA checkpoint
@@ -67,6 +68,7 @@ echo "Gradient accumulation: ${GRAD_ACCUM_STEPS}"
 echo "Number of GPUs: ${NUM_GPUS}"
 echo "Effective batch size: $((BATCH_SIZE * GRAD_ACCUM_STEPS * NUM_GPUS))"
 echo "Learning rate: ${LEARNING_RATE}"
+echo "Validation interval: Every ${VAL_INTERVAL} epoch(s)"
 echo "Output: ${OUTPUT_DIR}"
 if [[ -n "${RESUME_CHECKPOINT}" ]]; then
   echo "Resume checkpoint: ${RESUME_CHECKPOINT}"
@@ -75,9 +77,9 @@ else
 fi
 echo "=========================================="
 
-# Build the training command with arguments
-TRAIN_CMD="${PYTHON_BIN} ${DIR}/run_rfdetr_commonforms.py \
-  --dataset_name jbarrow/CommonForms \
+# Build the training script path and arguments
+TRAIN_SCRIPT="${DIR}/run_rfdetr_commonforms.py"
+TRAIN_ARGS="--dataset_name jbarrow/CommonForms \
   --cache_dir ${CACHE_DIR} \
   --output_dir ${OUTPUT_DIR} \
   --model_size ${MODEL_SIZE} \
@@ -86,6 +88,7 @@ TRAIN_CMD="${PYTHON_BIN} ${DIR}/run_rfdetr_commonforms.py \
   --grad_accum_steps ${GRAD_ACCUM_STEPS} \
   --learning_rate ${LEARNING_RATE} \
   --num_workers ${NUM_WORKERS} \
+  --val_interval ${VAL_INTERVAL} \
   ${RESUME_CHECKPOINT:+--resume_from_checkpoint ${RESUME_CHECKPOINT}} \
   ${HUB_ARGS}"
 
@@ -97,9 +100,10 @@ if [[ ${NUM_GPUS} -gt 1 ]]; then
   exec "${PYTHON_BIN}" -m torch.distributed.launch \
     --nproc_per_node="${NUM_GPUS}" \
     --use_env \
-    ${TRAIN_CMD}
+    "${TRAIN_SCRIPT}" \
+    ${TRAIN_ARGS}
 else
   echo "Launching single-GPU training..."
   echo ""
-  exec ${TRAIN_CMD}
+  exec "${PYTHON_BIN}" "${TRAIN_SCRIPT}" ${TRAIN_ARGS}
 fi
