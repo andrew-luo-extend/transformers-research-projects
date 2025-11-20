@@ -50,6 +50,11 @@ NUM_WORKERS="${NUM_WORKERS:-12}"
 # Set to a specific path like "/workspace/outputs/rfdetr-commonforms/checkpoint_ema.pt"
 # Leave empty to start from scratch
 RESUME_CHECKPOINT="${RESUME_CHECKPOINT:-}"
+
+# Multi-GPU training
+# Set to the number of GPUs to use (e.g., 2, 4, 8)
+# Leave as 1 for single-GPU training
+NUM_GPUS="${NUM_GPUS:-1}"
  
 
 echo "=========================================="
@@ -57,9 +62,10 @@ echo "RF-DETR Training on CommonForms"
 echo "=========================================="
 echo "Model size: ${MODEL_SIZE}"
 echo "Epochs: ${EPOCHS}"
-echo "Batch size: ${BATCH_SIZE}"
+echo "Batch size: ${BATCH_SIZE} (per GPU)"
 echo "Gradient accumulation: ${GRAD_ACCUM_STEPS}"
-echo "Effective batch size: $((BATCH_SIZE * GRAD_ACCUM_STEPS))"
+echo "Number of GPUs: ${NUM_GPUS}"
+echo "Effective batch size: $((BATCH_SIZE * GRAD_ACCUM_STEPS * NUM_GPUS))"
 echo "Learning rate: ${LEARNING_RATE}"
 echo "Output: ${OUTPUT_DIR}"
 if [[ -n "${RESUME_CHECKPOINT}" ]]; then
@@ -69,15 +75,31 @@ else
 fi
 echo "=========================================="
 
-exec "${PYTHON_BIN}" "${DIR}/run_rfdetr_commonforms.py" \
+# Build the training command with arguments
+TRAIN_CMD="${PYTHON_BIN} ${DIR}/run_rfdetr_commonforms.py \
   --dataset_name jbarrow/CommonForms \
-  --cache_dir "${CACHE_DIR}" \
-  --output_dir "${OUTPUT_DIR}" \
-  --model_size "${MODEL_SIZE}" \
-  --epochs "${EPOCHS}" \
-  --batch_size "${BATCH_SIZE}" \
-  --grad_accum_steps "${GRAD_ACCUM_STEPS}" \
-  --learning_rate "${LEARNING_RATE}" \
-  --num_workers "${NUM_WORKERS}" \
-  ${RESUME_CHECKPOINT:+--resume_from_checkpoint "${RESUME_CHECKPOINT}"} \
-  ${HUB_ARGS}
+  --cache_dir ${CACHE_DIR} \
+  --output_dir ${OUTPUT_DIR} \
+  --model_size ${MODEL_SIZE} \
+  --epochs ${EPOCHS} \
+  --batch_size ${BATCH_SIZE} \
+  --grad_accum_steps ${GRAD_ACCUM_STEPS} \
+  --learning_rate ${LEARNING_RATE} \
+  --num_workers ${NUM_WORKERS} \
+  ${RESUME_CHECKPOINT:+--resume_from_checkpoint ${RESUME_CHECKPOINT}} \
+  ${HUB_ARGS}"
+
+# Launch with single-GPU or multi-GPU
+if [[ ${NUM_GPUS} -gt 1 ]]; then
+  echo "Launching multi-GPU training with ${NUM_GPUS} GPUs..."
+  echo "Using torch.distributed.launch"
+  echo ""
+  exec "${PYTHON_BIN}" -m torch.distributed.launch \
+    --nproc_per_node="${NUM_GPUS}" \
+    --use_env \
+    ${TRAIN_CMD}
+else
+  echo "Launching single-GPU training..."
+  echo ""
+  exec ${TRAIN_CMD}
+fi
